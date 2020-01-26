@@ -46,11 +46,12 @@ usage(){
   echo '  -N                         append sequential number for the same name'
   echo '      --number-start=NUM     use NUM for starting number instead of 1'
   echo '      --padding=WIDTH        set padding zeros with maximum WIDTH'
-  echo '  -p, --pattern=PATTERN      change for files whose name matches PATTERN'
+  echo '  -p, --pattern=PATTERN(s)   change for files whose name matches PATTERN'
   echo '  -P EXPRESSION              use EXPRESSION after adding date or number string'
   echo '  -R, -r                     change in the directory recursively'
   echo '      --to-lowercase REGEX   convert the match of REGEX to lowercase'
   echo '      --to-uppercase REGEX   convert the match of REGEX to uppercase'
+  echo '  -v, --verbose              show all targets whose name is changed or not'
   echo '      --help                 display this help and exit'
   echo '      --version              output version information and exit'
   echo
@@ -264,15 +265,19 @@ numfmt=""
 numstart=0
 nochgflag=0
 readflag=0
+verboseflag=0
 
 dirmain(){
   case $1 in
   0)
-    ;;
-  1)
+    if ! [ -w ./ ]; then
+      error 0 "${path#[.]/}: Permission denied"
+      return 0
+    fi
     set -- ${target:-*}
     fnamelink=$(printf "%s/" "$@")
-    awk -v path="${path#[.]/}" -v fnamelink="${fnamelink%/}" \
+
+    awk -v path="${path%/}" -v fnamelink="${fnamelink%/}" \
     -v regexcapital="$regexcapital" \
     -v regextoupper="$regextoupper" \
     -v regextolower="$regextolower" \
@@ -321,23 +326,17 @@ dirmain(){
         targetlen = 0;
         fnamelen = split(fnamelink, fnames, "/");
         for (i = 1; i <= fnamelen; i++) {
-          if (system("test '$targetopt'" cmdparam(fnames[i])) == 0 &&
-              system("test -w" cmdparam(fnames[i])) == 0) {
+          if (system("test '$targetopt'" cmdparam(fnames[i])) == 0) {
             targetlen++;
           } else {
             fnames[i] = "";
           }
         }
-        if (targetlen == 0) {
-          exit;
-        } else if (path != "") {
-          printf "%s:\n", path;
+        printf "%s:\n%d target", path, targetlen;
+        if (targetlen > 1) {
+          printf "s";
         }
-        if ('$readflag' || '$nochgflag') {
-          indicator = "->";
-        } else {
-          indicator = "=>";
-        }
+        printf "\n";
         num = numstart;
         for (i = 1; i <= fnamelen; i++) {
           fname = fnames[i];
@@ -365,17 +364,28 @@ dirmain(){
               }
               name = name sprintf(numfmt, num);
             }
-            name = rename(name, postexpr);
-            printf "%s %s %s%s", fname, indicator, name, ext;
+            dest = rename(name, postexpr) ext;
+            if (dest == fname) {
+              if ('$verboseflag') {
+                printf "- %s\n", fname;
+              }
+              continue;
+            }
             ret = '$nochgflag';
             if ('$readflag') {
-              printf " ? (y/n): ";
+              printf "? %s  ->  %s  (y/n): ", fname, dest;
               ret = system("read a; case \"$a\" in [Yy]);; *) exit 1;; esac");
             } else {
+              if ('$nochgflag') {
+                type = "+";
+              } else {
+                type = "!";
+              }
+              printf "%s %s  ->  %s", type, fname, dest;
               printf "\n";
             }
             if (ret == 0) {
-              system("mv -i" cmdparam(fname) cmdparam(name ext));
+              system("mv -i" cmdparam(fname) cmdparam(dest));
             } else if (ret != 1) {
               exit 1;
             }
@@ -383,11 +393,12 @@ dirmain(){
         }
         printf "\n";
       }'
-      if [ $? = 1 ]; then
-        return 1
-      fi
+    ;;
+  1)
     ;;
   esac
+
+  return $?
 }
 
 # Escape backslashes for the specified format or expression if the character
@@ -434,7 +445,7 @@ escbslash(){
 padding=0
 link=0
 subdir=""
-param=$(getopt 'cC:d:e:E:fiIlnNp:P:Rr' 'no-change,interactive,ignore-extension,link,numbering,number-start:,padding:,pattern:,to-lowercase:,to-uppercase:,help,version' "$@")
+param=$(getopt 'cC:d:e:E:fiIlnNp:P:Rrv' 'no-change,interactive,ignore-extension,link,numbering,number-start:,padding:,pattern:,to-lowercase:,to-uppercase:,verbose,help,version' "$@")
 eval set -- "$param"
 
 while [ $# != 0 ]
@@ -510,7 +521,7 @@ do
     padding=${1#*=}
     ;;
   p|pattern)
-    target=$target" ${1#*=}"
+    target=${1#*=}
     ;;
   P)
     if ! (echo | sed "${1#*=}" > /dev/null 2>&1); then
@@ -541,6 +552,9 @@ do
       usage 1
     fi
     regextoupper=$(escbslash "${1#*=}")
+    ;;
+  v|verbose)
+    verboseflag=1
     ;;
   help)
     usage 0
@@ -581,11 +595,11 @@ do
     status=$?
     case $status in
     0) ;;
-    1) error 0 "cannot move to the directory -- $1";;
+    1) error 0 "${1%/}: Permission denied";;
     *) exit $status;;
     esac
   else
-    error 0 "cannot move to the regular file -- $1"
+    error 0 "$1: Is not a directory"
   fi
   shift
 done

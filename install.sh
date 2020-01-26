@@ -17,8 +17,10 @@ elif ! [ -d "$LIB" ]; then
 fi
 
 if [ -f ./chfname.sh ]; then
-  mkdir ${LIB}/fbatchsh
-  cp ./chfname.sh ${LIB}/fbatchsh/chfname.sh
+  mkdir -p ${LIB}/fbatchsh
+  cp -f ./chfname.sh ${LIB}/fbatchsh/chfname.sh
   chmod 755 ${LIB}/fbatchsh/chfname.sh
-  ln -s ${LIB}/fbatchsh/chfname.sh ${DIR}/chfname
+  if ! [ -h ${DIR}/chfname ]; then
+    ln -s ${LIB}/fbatchsh/chfname.sh ${DIR}/chfname
+  fi
 fi
