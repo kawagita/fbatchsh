@@ -21,9 +21,12 @@ PACKAGE='fbatchsh'
 PROGRAM='chfname'
 VERSION='1.0'
 
-AWKTOCASE=$(! awk 'BEGIN { toupper(""); tolower("") }' 2> /dev/null; echo $?)
+unalias -a
 
-DATEREFTIME=$(! date -r /dev/null > /dev/null 2>&1; echo $?)
+AWKTOCASE=$(! awk 'BEGIN { toupper(""); tolower("") }' 2> /dev/null; echo $?)
+AWKMATCHBYTES=$(! awk -b 'BEGIN { }' 2>&1 | awk '$0 != "" { exit 1 }'; echo $?)
+
+DATEREFTIME=$(! date -r / > /dev/null 2>&1; echo $?)
 
 # Print the usage
 #
@@ -38,23 +41,30 @@ usage(){
   echo "Usage: $PROGRAM [OPTION] DIR..."
   echo 'Set the name of files or directories in each DIR(s) by standard Unix commands.'
   echo
+  echo '  -b, --rollback-directory   reverse changes in directory when target failed'
   echo '  -c, --no-change            do not change any files or directories'
-  echo '  -C REGEX                   capitalize the match of REGEX'
+  echo '      --capitalize=REGEX     capitalize the match of REGEX'
   echo '  -d FORMAT                  append the modification time output with FORMAT'
   echo '  -e EXPRESSION              use EXPRESSION to replace file names'
   echo '  -f                         change the name of only files'
+  echo '  -h                         change the name of symbolic links'
   echo '  -i, --interactive          prompt before change'
   echo '  -I, --ignore-extension     ignore file extension when the name is changed'
+  echo '  -k, --keep-running         continue to traverse directories as possible'
   echo '  -l, --link                 follow the symbolic link (with -R)'
   echo '  -n, --numbering            append sequential number'
   echo '  -N                         append sequential number for the same name'
   echo '      --number-start=NUM     use NUM for starting number instead of 1'
   echo '      --number-padding=NUM   use NUM for the maximum padding zeros'
+  if [ $AWKMATCHBYTES != 0 ]; then
+    echo '  -M, --multibyte            arrange the output of multibyte encodings'
+  fi
   echo '  -p EXPRESSION              use EXPRESSION after adding date or number string'
   echo '  -R, --recursive            change the name in directories recursively'
-  echo '  -T, --target=PATTERN(s)    find targets whose name matches a PATTERN'
-  echo '      --to-lowercase REGEX   convert the match of REGEX to lowercase'
-  echo '      --to-uppercase REGEX   convert the match of REGEX to uppercase'
+  echo "      --skip-error           skip target's error in directory"
+  echo '  -T PATTERN(s)              find targets whose name matches a PATTERN'
+  echo '      --to-lowercase=REGEX   convert the match of REGEX to lowercase'
+  echo '      --to-uppercase=REGEX   convert the match of REGEX to uppercase'
   echo '  -v, --verbose              show all targets whose name is changed or not'
   echo '      --help                 display this help and exit'
   echo '      --version              output version information and exit'
@@ -192,6 +202,9 @@ getopt(){
 # to the parent directory after calling dirmain function with 1,
 # and return 1 or 2 if can't start or fail the traversal, otherwise, 0
 
+travlinefeed=""
+travstopped=1
+
 dirtrav(){
   (link=$1
    if [ -n "$2" ]; then
@@ -207,16 +220,17 @@ dirtrav(){
 
    while true
    do
-     if ! dirmain 0; then
+     if ! dirmain 0 && [ $travstopped != 0 ]; then
        exit 2
      fi
      shift
      set -- $subdir / "$@"
+     travlinefeed='\n'
 
      while true
      do
        if [ "$1" = '/' ]; then
-         if ! dirmain 1; then
+         if ! dirmain 1 && [ $travstopped != 0 ]; then
            exit 2
          fi
          path=/$path
@@ -262,10 +276,11 @@ VERBOSEMARK='-'
 ERRORMARK='E'
 
 target=""
-targetmark=$EXECUTEDMARK
 targetunchanged=0
 targetprompt=0
 targetverbose=0
+targetrollback=0
+targetsymlink=0
 testopt='-e'
 extignored=0
 regexcapital=""
@@ -277,26 +292,48 @@ datefmt=""
 numfmt=""
 numsamenamed=0
 numstart=0
+multibyte=0
+errskipped=0
+errdisposition='exit 1'
 
 dirmain(){
   case $1 in
   0)
+    if [ $targetunchanged ]; then
+      mark=$UNCHANGEDMARK
+    elif [ $targetprompt ]; then
+      mark=$PROMPTMARK
+    else
+      mark=$EXECUTEDMARK
+    fi
     set -- ${target:-*}
-    fnamelink=$(printf "%s/" "$@")
-
-    awk -v dirpath="${path%/}" -v dirwrite=$(test ! -w ./; echo $?) \
-        -v regexcapital="$regexcapital" \
+    awk -v regexcapital="$regexcapital" \
         -v regextoupper="$regextoupper" \
         -v regextolower="$regextolower" \
-        -v datefmt="$datefmt" -v numfmt="$numfmt" -v numstart=$numstart \
-        -v sedexpr="$sedexpr" -v postexpr="$postexpr" '
+        -v datefmt="$datefmt" -v numfmt="$numfmt" -v numstart=$numstart '
+      function showtarget(mark, target, width, dest) {
+        printf "%s %-" width "s", mark, target;
+        if (dest != "") {
+          printf " -> %s", dest;
+          if (mark == "'$PROMPTMARK'") {
+            printf "  (y/n): ";
+            return;
+          }
+        }
+        printf "\n";
+      }
+      function multilen(target) {
+        if ('$multibyte') {
+          return gsub(/[^\x01-\x7f]/, "&", target);
+        }
+      }
       function cmdparam(param) {
         gsub(/'\''/, "'\''\\\\&'\''", param);
         return " '\''" param "'\''";
       }
-      function getdate(fname, datefmt,  datecmd) {
+      function getdate(datetarget, datefmt,  datecmd) {
         if (datefmt != "") {
-          datecmd = "date -r" cmdparam(fname) cmdparam("+" datefmt);
+          datecmd = "date -r" datetarget cmdparam("+" datefmt);
           datecmd | getline;
           close(datecmd);
           return $0;
@@ -329,82 +366,115 @@ dirmain(){
         }
         return name;
       }
-      function showtarget(mark, src, dest) {
-        printf "%s %s", mark, src;
-        if (dest != "") {
-          printf "  ->  %s", dest;
-          if (mark == "'"$PROMPTMARK"'") {
-            printf "  (y/n): ";
-            return;
-          }
-        }
-        printf "\n";
-      }
+
       BEGIN {
-        ftargetlen = 0;
-        for (i = 1; i < ARGC; i++) {
-          if (system("test '$testopt'" cmdparam(ARGV[i])) == 0) {
-            ftargets[i] = ARGV[i];
-            ftargetlen++;
-          }
-        }
-        printf "%s:\n%d target", dirpath, ftargetlen;
-        if (ftargetlen > 1) {
-          printf "s";
-        }
-        printf "\n";
+        dirpath = ARGV[1];
+        dirwrite = system("test ! -w ./");
         num = numstart;
-        for (i = 1; i <= ftargetlen; i++) {
-          ftarget = ftargets[i];
-          if (!dirwrite) {
-            showtarget("'"$ERRORMARK"'", ftarget);
-            continue;
-          }
-          if ('$extignored' && \
-              match(ftarget, /(\.[0-9A-Za-z]+)?\.[0-9A-Za-z]+$/) && \
-              RSTART > 1) {
-            name = substr(ftarget, 1, RSTART - 1);
-            ext = substr(ftarget, RSTART);
-          } else {
-            name = ftarget;
-            ext = "";
-          }
-          name = rename(name, sedexpr) getdate(ftarget, datefmt);
-          name = tocase(0, name, regexcapital);
-          name = tocase(-1, tocase(1, name, regextoupper), regextolower);
-          if (numfmt != "") {
-            if ('$numsamenamed') {
-              num = filenum[name];
-              if (num == "") {
-                num = numstart;
-              }
-              num++;
-              filenum[name] = num;
-            } else {
-              num++;
+        targetmaxlen = 0;
+        targetsize = 0;
+        for (i = 2; i < ARGC; i++) {
+          target = ARGV[i];
+          cmdtarget = cmdparam(target);
+          if (system("test '$testopt'" cmdtarget) == 0 && \
+              ('$targetsymlink' || system("test ! -h" cmdtarget) == 0)) {
+            if (++targetsize > 1) {
+              pl = "s";
             }
-            name = name sprintf(numfmt, num);
-          }
-          fname = rename(name, postexpr) ext;
-          if (fname == ftarget) {
-            if ('$targetverbose') {
-              showtarget("'"$VERBOSEMARK"'", ftarget);
+            len = length(target) + multilen(target);
+            if (len > targetmaxlen) {
+              targetmaxlen = len;
             }
-            continue;
-          }
-          showtarget("'"$targetmark"'", ftarget, fname);
-          ret = '$targetunchanged';
-          if ('$targetprompt') {
-            ret = system("read a; case \"$a\" in [Yy]);; *) exit 1;; esac");
-          }
-          if (ret == 0) {
-            system("mv -i --" cmdparam(ftarget) cmdparam(fname));
-          } else if (ret != 1) {
-            exit 1;
+            targets[targetsize] = target;
           }
         }
-        printf "\n";
-      }' "$@"
+        printf "'"$travlinefeed"'%s:\n%d target%s\n", dirpath, targetsize, pl;
+        for (i = 1; i <= targetsize; i++) {
+          target = targets[i];
+          targetwidth = targetmaxlen - multilen(target);
+          cmdtarget = cmdparam(target);
+          cmdstatus = 0;
+          if (dirwrite) {
+            if ('$extignored' && \
+                match(target, /(\.[0-9A-Za-z]+)?\.[0-9A-Za-z]+$/) && \
+                RSTART > 1) {
+              name = substr(target, 1, RSTART - 1);
+              ext = substr(target, RSTART);
+            } else {
+              name = target;
+              ext = "";
+            }
+            name = rename(name, "'"$sedexpr"'") getdate(cmdtarget, datefmt);
+            name = tocase(0, name, regexcapital);
+            name = tocase(-1, tocase(1, name, regextoupper), regextolower);
+            if (numfmt != "") {
+              if ('$numsamenamed') {
+                num = filenum[name];
+                if (num == "") {
+                  num = numstart;
+                }
+                num++;
+                filenum[name] = num;
+              } else {
+                num++;
+              }
+              name = name sprintf(numfmt, num);
+            }
+            destname = rename(name, "'"$postexpr"'") ext;
+            if (destname == target) {
+              if ('$targetverbose') {
+                showtarget("'$VERBOSEMARK'", target);
+              }
+              continue;
+            }
+            cmddest = cmdparam(destname);
+            if (system("test ! -e" cmddest) == 0) {
+              showtarget("'$mark'", target, targetwidth, destname);
+              ret = '$targetunchanged';
+              if ('$targetprompt') {
+                ret = system("read ans;case $ans in [Yy]);; *) exit 1;;esac");
+                if (ret > 1) {
+                  printf "\n";
+                }
+              }
+              if (ret == 0) {
+                ret = system("mv -f --" cmdtarget cmddest);
+                if (ret == 0) {
+                  cmddests[i] = cmddest;
+                  continue;
+                }
+              } else if (ret == 1) {
+                continue;
+              }
+              cmdstatus = ret;
+            } else {
+              showtarget("'$ERRORMARK'", target, targetwidth, destname);
+            }
+          } else {
+            showtarget("'$ERRORMARK'", target);
+          }
+          if ('$targetrollback') {
+            fsize = 0;
+            pl = "";
+            for (i = targetsize; i > 0; i--) {
+              if (cmddests[i] != "") {
+                if (system("mv -f --" cmddests[i] cmdparam(targets[i])) != 0) {
+                  exit 1;
+                } else if (++fsize > 1) {
+                  pl = "s";
+                }
+              }
+            }
+            if (fsize > 0) {
+              printf "Rolled back %d file%s.\n", fsize, pl;
+            }
+            exit 1;
+          } else if (cmdstatus != 0) {
+            exit cmdstatus;
+          }
+          '"$errdisposition"';
+        }
+      }' "${path%/}" "$@"
     ;;
   1)
     ;;
@@ -441,23 +511,33 @@ escbslash(){
 padding=0
 link=0
 subdir=""
-param=$(getopt 'cC:d:e:E:fiIlnNp:RT:v' 'no-change,interactive,ignore-extension,link,numbering,number-start:,number-padding:,recursive,target:,to-lowercase:,to-uppercase:,verbose,help,version' "$@")
-eval set -- "$param"
+optchars='bcd:e:E:fhiIklnNp:RT:v'
+longopts='rollback-directory,no-change,capitalize:,interactive,ignore-extension,keep-running,link,numbering,number-start:,number-padding:,recursive,skip-error,target:,to-lowercase:,to-uppercase:,verbose,help,version'
+if [ $AWKMATCHBYTES != 0 ]; then
+  optchars=${optchars}'M'
+  longopts=${longopts}',multibyte'
+fi
+argval=$(getopt "$optchars" "$longopts" "$@")
+eval set -- "$argval"
 
 while [ $# != 0 ]
 do
   case ${1%%=*} in
+  b|rollback-directory)
+    if [ $errskipped = 0 ]; then
+      targetrollback=1
+    fi
+    ;;
   c|no-change)
-    targetmark=$UNCHANGEDMARK
     targetunchanged=1
     targetprompt=0
     ;;
-  C)
+  capitalize)
     if [ $AWKTOCASE = 0 ]; then
       error 0 'the function to uppercase or lowercase is unsupported'
       usage 1
-    elif ! awk 'BEGIN { match("",/'"${1#*=}"'/) }' > /dev/null 2>&1; then
-      error 0 "unsupported regular expression of awk script -- ${1#*=}"
+    elif ! awk -v r="${1#*=}" 'BEGIN { match("", r) }' > /dev/null 2>&1; then
+      error 0 "unsupported awk's regular expression '${1#*=}'"
       usage 1
     fi
     regexcapital=$(escbslash "${1#*=}")
@@ -467,15 +547,15 @@ do
       error 0 'the reference of file date is unsupported'
       usage 1
     elif ! (date -r /dev/null "+${1#*=}" | \
-            awk 'NR > 1 { exit 1 }' > /dev/null 2>&1); then
-      error 0 "unsupported date format -- ${1#*=}"
+            awk 'NR > 1 { exit 1 }') > /dev/null 2>&1; then
+      error 0 "unsupported date format '${1#*=}'"
       usage 1
     fi
     datefmt=$(escbslash "${1#*=}")
     ;;
   e)
     if ! (echo | sed "${1#*=}" > /dev/null 2>&1); then
-      error 0 "unsupported sed expression -- ${1#*=}"
+      error 0 "unsupported sed expression '${1#*=}'"
       usage 1
     fi
     sedexpr=$(escbslash "${1#*=}")
@@ -483,14 +563,19 @@ do
   f)
     testopt='-f'
     ;;
+  h)
+    targetsymlink=1
+    ;;
   i|interactive)
     if [ $targetunchanged = 0 ]; then
-      targetmark=$PROMPTMARK
       targetprompt=1
     fi
     ;;
   I|ignore-extension)
     extignored=1
+    ;;
+  k|keep-running)
+    travstopped=0
     ;;
   l|link)
     link=1
@@ -505,7 +590,7 @@ do
   number-start)
     if [ "${1#*=}" != 0 ] && \
        ! expr "${1#*=}" : '[1-9][0-9]*$' > /dev/null 2>&1; then
-      error 0 "invalid number start -- ${1#*=}"
+      error 0 "invalid number start '${1#*=}'"
       usage 1
     fi
     numstart=$((${1#*=} - 1))
@@ -513,14 +598,17 @@ do
   number-padding)
     if [ "${1#*=}" != 0 ] && \
        ! expr "${1#*=}" : '[1-9][0-9]*$' > /dev/null 2>&1; then
-      error 0 "invalid padding width -- ${1#*=}"
+      error 0 "invalid padding width '${1#*=}'"
       usage 1
     fi
     padding=${1#*=}
     ;;
+  M|multibyte)
+    multibyte=1
+    ;;
   p)
     if ! (echo | sed "${1#*=}" > /dev/null 2>&1); then
-      error 0 "unsupported sed expression -- ${1#*=}"
+      error 0 "unsupported sed expression '${1#*=}'"
       usage 1
     fi
     postexpr=$(escbslash "${1#*=}")
@@ -528,15 +616,20 @@ do
   R|recursive)
     subdir='*/'
     ;;
-  T|target)
+  skip-error)
+    errskipped=1
+    errdisposition='continue'
+    targetrollback=0
+    ;;
+  T)
     target=${1#*=}
     ;;
   to-lowercase)
     if [ $AWKTOCASE = 0 ]; then
       error 0 'the function to uppercase or lowercase is unsupported'
       usage 1
-    elif ! awk 'BEGIN { match("",/'"${1#*=}"'/) }' > /dev/null 2>&1; then
-      error 0 "unsupported regular expression of awk script -- ${1#*=}"
+    elif ! awk -v r="${1#*=}" 'BEGIN { match("", r) }' > /dev/null 2>&1; then
+      error 0 "unsupported awk's regular expression '${1#*=}'"
       usage 1
     fi
     regextolower=$(escbslash "${1#*=}")
@@ -545,8 +638,8 @@ do
     if [ $AWKTOCASE = 0 ]; then
       error 0 'the function to uppercase or lowercase is unsupported'
       usage 1
-    elif ! awk 'BEGIN { match("",/'"${1#*=}"'/) }' > /dev/null 2>&1; then
-      error 0 "unsupported regular expression of awk script -- ${1#*=}"
+    elif ! awk -v r="${1#*=}" 'BEGIN { match("", r) }' > /dev/null 2>&1; then
+      error 0 "unsupported awk's regular expression '${1#*=}'"
       usage 1
     fi
     regextoupper=$(escbslash "${1#*=}")
