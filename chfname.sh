@@ -41,7 +41,7 @@ usage(){
   echo "Usage: $PROGRAM [OPTION] DIR..."
   echo 'Set the name of files or directories in each DIR(s) by standard Unix commands.'
   echo
-  echo '  -b, --rollback-directory   reverse changes in directory when target failed'
+  echo '  -b, --rollback-directory   reverse changes in directory when a file failed'
   echo '  -c, --no-change            do not change any files or directories'
   echo '      --capitalize=REGEX     capitalize the match of REGEX'
   echo '  -d FORMAT                  append the modification time output with FORMAT'
@@ -269,14 +269,8 @@ dirtrav(){
 # $path - the pathname to the current directory if called from dirtrav function
 # return non-zero if can't process the target, otherwise, zero
 
-EXECUTEDMARK='!'
-UNCHANGEDMARK='+'
-PROMPTMARK='?'
-VERBOSEMARK='-'
-ERRORMARK='E'
-
 target=""
-targetunchanged=0
+targetnochange=0
 targetprompt=0
 targetverbose=0
 targetrollback=0
@@ -293,39 +287,36 @@ numfmt=""
 numsamenamed=0
 numstart=0
 multibyte=0
-errskipped=0
-errdisposition='exit 1'
+errstopped=1
 
 dirmain(){
   case $1 in
   0)
-    if [ $targetunchanged ]; then
-      mark=$UNCHANGEDMARK
-    elif [ $targetprompt ]; then
-      mark=$PROMPTMARK
-    else
-      mark=$EXECUTEDMARK
-    fi
     set -- ${target:-*}
     awk -v regexcapital="$regexcapital" \
         -v regextoupper="$regextoupper" \
         -v regextolower="$regextolower" \
         -v datefmt="$datefmt" -v numfmt="$numfmt" -v numstart=$numstart '
-      function showtarget(mark, target, width, dest) {
-        printf "%s %-" width "s", mark, target;
+      function targetoutput(str, width, target, dest) {
+        str = sprintf("%s %-" width "s", str, target);
         if (dest != "") {
-          printf " -> %s", dest;
-          if (mark == "'$PROMPTMARK'") {
-            printf "  (y/n): ";
-            return;
-          }
+          str = str sprintf(" -> %s", dest);
         }
-        printf "\n";
+        return str;
       }
       function multilen(target) {
         if ('$multibyte') {
           return gsub(/[^\x01-\x7f]/, "&", target);
         }
+        return 0;
+      }
+      function contains(array, target,  ind) {
+        for (ind in array) {
+          if (array[ind] == target) {
+            return 1;
+          }
+        }
+        return 0;
       }
       function cmdparam(param) {
         gsub(/'\''/, "'\''\\\\&'\''", param);
@@ -333,7 +324,7 @@ dirmain(){
       }
       function getdate(datetarget, datefmt,  datecmd) {
         if (datefmt != "") {
-          datecmd = "date -r" datetarget cmdparam("+" datefmt);
+          datecmd = "date -r" cmdparam(datetarget) cmdparam("+" datefmt);
           datecmd | getline;
           close(datecmd);
           return $0;
@@ -366,114 +357,146 @@ dirmain(){
         }
         return name;
       }
-
       BEGIN {
+        EXECUTEDMARK = "!";
+        CHANGECANDMARK = "+";
+        QUESTIONMARK = "?";
+        UNCHANGEDMARK = "-";
+        ERRORMARK = "E";
         dirpath = ARGV[1];
         dirwrite = system("test ! -w ./");
         num = numstart;
-        targetmaxlen = 0;
+        targetwidth = 0;
         targetsize = 0;
         for (i = 2; i < ARGC; i++) {
           target = ARGV[i];
-          cmdtarget = cmdparam(target);
-          if (system("test '$testopt'" cmdtarget) == 0 && \
-              ('$targetsymlink' || system("test ! -h" cmdtarget) == 0)) {
+          if (system("test '$testopt'" cmdparam(target)) == 0 && \
+              ('$targetsymlink' || system("test -h" cmdparam(target)) != 0)) {
             if (++targetsize > 1) {
               pl = "s";
             }
             len = length(target) + multilen(target);
-            if (len > targetmaxlen) {
-              targetmaxlen = len;
+            if (targetwidth < len) {
+              targetwidth = len;
             }
             targets[targetsize] = target;
           }
         }
         printf "'"$travlinefeed"'%s:\n%d target%s\n", dirpath, targetsize, pl;
+        targetstopped = 0;
+        targetasked = 0;
         for (i = 1; i <= targetsize; i++) {
           target = targets[i];
-          targetwidth = targetmaxlen - multilen(target);
-          cmdtarget = cmdparam(target);
-          cmdstatus = 0;
-          if (dirwrite) {
-            if ('$extignored' && \
-                match(target, /(\.[0-9A-Za-z]+)?\.[0-9A-Za-z]+$/) && \
-                RSTART > 1) {
-              name = substr(target, 1, RSTART - 1);
-              ext = substr(target, RSTART);
-            } else {
-              name = target;
-              ext = "";
-            }
-            name = rename(name, "'"$sedexpr"'") getdate(cmdtarget, datefmt);
-            name = tocase(0, name, regexcapital);
-            name = tocase(-1, tocase(1, name, regextoupper), regextolower);
-            if (numfmt != "") {
-              if ('$numsamenamed') {
-                num = filenum[name];
-                if (num == "") {
-                  num = numstart;
-                }
-                num++;
-                filenum[name] = num;
-              } else {
-                num++;
-              }
-              name = name sprintf(numfmt, num);
-            }
-            destname = rename(name, "'"$postexpr"'") ext;
-            if (destname == target) {
-              if ('$targetverbose') {
-                showtarget("'$VERBOSEMARK'", target);
-              }
-              continue;
-            }
-            cmddest = cmdparam(destname);
-            if (system("test ! -e" cmddest) == 0) {
-              showtarget("'$mark'", target, targetwidth, destname);
-              ret = '$targetunchanged';
-              if ('$targetprompt') {
-                ret = system("read ans;case $ans in [Yy]);; *) exit 1;;esac");
-                if (ret > 1) {
-                  printf "\n";
-                }
-              }
-              if (ret == 0) {
-                ret = system("mv -f --" cmdtarget cmddest);
-                if (ret == 0) {
-                  cmddests[i] = cmddest;
-                  continue;
-                }
-              } else if (ret == 1) {
-                continue;
-              }
-              cmdstatus = ret;
-            } else {
-              showtarget("'$ERRORMARK'", target, targetwidth, destname);
-            }
+          if (! dirwrite) {
+            targetmarks[i] = ERRORMARK;
+            targetstopped = '$errstopped';
+            continue;
+          }
+          if ('$extignored' && \
+              match(target, /(\.[0-9A-Za-z]+)?\.[0-9A-Za-z]+$/) && \
+              RSTART > 1) {
+            name = substr(target, 1, RSTART - 1);
+            ext = substr(target, RSTART);
           } else {
-            showtarget("'$ERRORMARK'", target);
+            name = target;
+            ext = "";
           }
-          if ('$targetrollback') {
-            fsize = 0;
-            pl = "";
-            for (i = targetsize; i > 0; i--) {
-              if (cmddests[i] != "") {
-                if (system("mv -f --" cmddests[i] cmdparam(targets[i])) != 0) {
-                  exit 1;
-                } else if (++fsize > 1) {
-                  pl = "s";
-                }
+          name = rename(name, "'"$sedexpr"'") getdate(target, datefmt);
+          name = tocase(0, name, regexcapital);
+          name = tocase(-1, tocase(1, name, regextoupper), regextolower);
+          if (numfmt != "") {
+            if ('$numsamenamed') {
+              num = filenum[name];
+              if (num == "") {
+                num = numstart;
               }
+              num++;
+              filenum[name] = num;
+            } else {
+              num++;
             }
-            if (fsize > 0) {
-              printf "Rolled back %d file%s.\n", fsize, pl;
-            }
-            exit 1;
-          } else if (cmdstatus != 0) {
-            exit cmdstatus;
+            name = name sprintf(numfmt, num);
           }
-          '"$errdisposition"';
+          destname = rename(name, "'"$postexpr"'") ext;
+          if (destname == target) {
+            if ('$targetverbose') {
+              targetmarks[i] = UNCHANGEDMARK;
+            }
+            continue;
+          }
+          destexist = contains(destnames, destname);
+          destnames[i] = destname;
+          if (index(destname, "/") > 0 || \
+              destexist || (! contains(changenames, destname) && \
+                            system("test -e" cmdparam(destname)) == 0)) {
+            targetmarks[i] = ERRORMARK;
+            targetstopped = '$errstopped';
+            continue;
+          } else if ('$targetnochange') {
+            targetmarks[i] = CHANGECANDMARK;
+          } else if ('$targetprompt') {
+            targetmarks[i] = QUESTIONMARK;
+            targetasked = 1;
+            print targetoutput(QUESTIONMARK, targetwidth - multilen(target),
+                               target, destname) > "/dev/stderr";
+          } else {
+            targetmarks[i] = EXECUTEDMARK;
+          }
+          changenames[i] = target;
         }
+        delete changenames;
+        changeaction = "Changed";
+        changestatus = targetstopped;
+        changesize = 0;
+        if (targetasked) {
+          printf "Change the above file names ? (y/n): " > "/dev/stderr";
+          askstatus = system("read ans;case $ans in [Yy]);; *) exit 1;;esac");
+          if (askstatus > 1) {
+            print > "/dev/stderr";
+            exit askstatus;
+          }
+        }
+        for (i = 1; i <= targetsize; i++) {
+          targetmark = targetmarks[i];
+          if (targetmark == "") {
+            continue;
+          } else if (targetmark == QUESTIONMARK) {
+            if (askstatus) {
+              targetmark = CHANGECANDMARK;
+            } else {
+              targetmark = EXECUTEDMARK;
+            }
+          } else if (targetmark == EXECUTEDMARK) {
+            if (targetstopped) {
+              targetmark = CHANGECANDMARK;
+            }
+          }
+          if (targetmark == EXECUTEDMARK) {
+            if (system("mv --" cmdparam(targets[i]) cmdparam(destnames[i]))) {
+              if ('$targetrollback' && changesize > 0) {
+                while (--i > 0) {
+                  destname = destnames[i];
+                  if (destname != "") {
+                    system("mv -f --" cmdparam(destname) cmdparam(targets[i]));
+                  }
+                }
+                changeaction = "Rolled back";
+              }
+              changestatus = 1;
+              break;
+            }
+            changesize++;
+          }
+          print targetoutput(targetmark, targetwidth - multilen(targets[i]),
+                             targets[i], destnames[i]);
+        }
+        if (changesize > 0) {
+          if (changesize == 1) {
+            pl = "";
+          }
+          printf "%s %d item%s.\n", changeaction, changesize, pl;
+        }
+        exit changestatus;
       }' "${path%/}" "$@"
     ;;
   1)
@@ -524,13 +547,10 @@ while [ $# != 0 ]
 do
   case ${1%%=*} in
   b|rollback-directory)
-    if [ $errskipped = 0 ]; then
-      targetrollback=1
-    fi
+    targetrollback=1
     ;;
   c|no-change)
-    targetunchanged=1
-    targetprompt=0
+    targetnochange=1
     ;;
   capitalize)
     if [ $AWKTOCASE = 0 ]; then
@@ -567,9 +587,7 @@ do
     targetsymlink=1
     ;;
   i|interactive)
-    if [ $targetunchanged = 0 ]; then
-      targetprompt=1
-    fi
+    targetprompt=1
     ;;
   I|ignore-extension)
     extignored=1
@@ -617,9 +635,7 @@ do
     subdir='*/'
     ;;
   skip-error)
-    errskipped=1
-    errdisposition='continue'
-    targetrollback=0
+    errstopped=0
     ;;
   T)
     target=${1#*=}
