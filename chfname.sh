@@ -62,7 +62,7 @@ usage(){
   echo '  -p EXPRESSION              use EXPRESSION after adding date or number string'
   echo '  -R, --recursive            change the name in directories recursively'
   echo "      --skip-error           skip target's error in directory"
-  echo '  -T PATTERN(s)              find targets whose name matches a PATTERN'
+  echo '  -T REGEX                   find targets whose name matches REGEX in directory'
   echo '      --to-lowercase=REGEX   convert the match of REGEX to lowercase'
   echo '      --to-uppercase=REGEX   convert the match of REGEX to uppercase'
   echo '  -v, --verbose              show all targets whose name is changed or not'
@@ -71,10 +71,6 @@ usage(){
   echo
   echo 'REGEX is used by match function of awk script. FORMAT or EXPRESSION is followed'
   echo 'by -d or -e option of date or sed command. In details, see the manual.'
-  echo
-  echo 'PATTEN is matched with file or directory names in the bourne shell. This is not'
-  echo 'parsed as regular expression. ? match any character and * is used as wildcard.'
-  echo 'The match of characters or ranges can be specified between [ and ].'
   exit 0
 }
 
@@ -269,17 +265,18 @@ dirtrav(){
 # $path - the pathname to the current directory if called from dirtrav function
 # return non-zero if can't process the target, otherwise, zero
 
-target=""
+targetregex=""
 targetnochange=0
 targetprompt=0
 targetverbose=0
 targetrollback=0
+targetdir=1
 targetsymlink=0
-testopt='-e'
 extignored=0
-regexcapital=""
-regextoupper=""
-regextolower=""
+caseorder=""
+caseregexcaps=""
+caseregextoupper=""
+caseregextolower=""
 sedexpr=""
 postexpr=""
 datefmt=""
@@ -289,13 +286,18 @@ numstart=0
 multibyte=0
 errstopped=1
 
+CASECAPSFLAG=0
+CASETOUPPERFLAG=1
+CASETOLOWERFLAG=2
+
 dirmain(){
   case $1 in
   0)
-    set -- ${target:-*}
-    awk -v regexcapital="$regexcapital" \
-        -v regextoupper="$regextoupper" \
-        -v regextolower="$regextolower" \
+    set -- *
+    awk -v targetregex="$targetregex" \
+        -v caseorder="${caseorder# }" -v caseregexcaps="$caseregexcaps" \
+        -v caseregextoupper="$caseregextoupper" \
+        -v caseregextolower="$caseregextolower" \
         -v datefmt="$datefmt" -v numfmt="$numfmt" -v numstart=$numstart '
       function targetoutput(str, width, target, dest) {
         str = sprintf("%s %-" width "s", str, target);
@@ -322,14 +324,17 @@ dirmain(){
         gsub(/'\''/, "'\''\\\\&'\''", param);
         return " '\''" param "'\''";
       }
-      function getdate(datetarget, datefmt,  datecmd) {
+      function getdate(target, datefmt,  datecmd) {
         if (datefmt != "") {
-          datecmd = "date -r" cmdparam(datetarget) cmdparam("+" datefmt);
+          datecmd = "date -r" cmdparam(target) cmdparam("+" datefmt);
           datecmd | getline;
           close(datecmd);
           return $0;
         }
         return "";
+      }
+      function setname(target, mvopt, dest) {
+        return system("mv" mvopt " --" cmdparam(target) cmdparam(dest));
       }
       function rename(name, sedexpr,  sedcmd) {
         if (sedexpr != "") {
@@ -345,12 +350,12 @@ dirmain(){
       function tocase(flag, name, regex,  rstr) {
         if (match(name, regex) && RLENGTH > 0) {
           rstr = substr(name, RSTART, RLENGTH);
-          if (flag > 0) {
-            rstr = toupper(rstr);
-          } else if (flag < 0) {
-            rstr = tolower(rstr);
-          } else {
+          if (flag == '$CASECAPSFLAG') {
             rstr = toupper(substr(rstr, 1, 1)) tolower(substr(rstr, 2));
+          } else if (flag == '$CASETOUPPERFLAG') {
+            rstr = toupper(rstr);
+          } else if (flag == '$CASETOLOWERFLAG') {
+            rstr = tolower(rstr);
           }
           return substr(name, 1, RSTART - 1) rstr \
                  substr(name, RSTART + RLENGTH);
@@ -366,27 +371,34 @@ dirmain(){
         dirpath = ARGV[1];
         dirwrite = system("test ! -w ./");
         num = numstart;
+        caseflagsize = split(caseorder, caseflags, " ");
+        caseregexes['$CASECAPSFLAG'] = caseregexcaps;
+        caseregexes['$CASETOUPPERFLAG'] = caseregextoupper;
+        caseregexes['$CASETOLOWERFLAG'] = caseregextolower;
+        delete ARGV[1];
         targetwidth = 0;
         targetsize = 0;
         for (i = 2; i < ARGC; i++) {
-          target = ARGV[i];
-          if (system("test '$testopt'" cmdparam(target)) == 0 && \
-              ('$targetsymlink' || system("test -h" cmdparam(target)) != 0)) {
+          fname = ARGV[i];
+          if (fname ~ targetregex && \
+              (fname != "*" || system("test -e" cmdparam("*")) == 0) && \
+              ('$targetdir' || system("test -f" cmdparam(fname)) == 0) && \
+              ('$targetsymlink' || system("test ! -h" cmdparam(fname)) == 0)) {
+            targetnames[targetsize] = fname;
             if (++targetsize > 1) {
               pl = "s";
             }
-            len = length(target) + multilen(target);
+            len = length(fname) + multilen(fname);
             if (targetwidth < len) {
               targetwidth = len;
             }
-            targets[targetsize] = target;
           }
         }
         printf "'"$travlinefeed"'%s:\n%d target%s\n", dirpath, targetsize, pl;
         targetstopped = 0;
         targetasked = 0;
-        for (i = 1; i <= targetsize; i++) {
-          target = targets[i];
+        for (i = 0; i < targetsize; i++) {
+          target = targetnames[i];
           if (! dirwrite) {
             targetmarks[i] = ERRORMARK;
             targetstopped = '$errstopped';
@@ -402,8 +414,9 @@ dirmain(){
             ext = "";
           }
           name = rename(name, "'"$sedexpr"'") getdate(target, datefmt);
-          name = tocase(0, name, regexcapital);
-          name = tocase(-1, tocase(1, name, regextoupper), regextolower);
+          for (j = 1; j <= caseflagsize; j++) {
+            name = tocase(caseflags[j], name, caseregexes[caseflags[j]]);
+          }
           if (numfmt != "") {
             if ('$numsamenamed') {
               num = filenum[name];
@@ -427,8 +440,7 @@ dirmain(){
           destexist = contains(destnames, destname);
           destnames[i] = destname;
           if (index(destname, "/") > 0 || \
-              destexist || (! contains(changenames, destname) && \
-                            system("test -e" cmdparam(destname)) == 0)) {
+              destexist || contains(ARGV, destname)) {
             targetmarks[i] = ERRORMARK;
             targetstopped = '$errstopped';
             continue;
@@ -437,47 +449,57 @@ dirmain(){
           } else if ('$targetprompt') {
             targetmarks[i] = QUESTIONMARK;
             targetasked = 1;
-            print targetoutput(QUESTIONMARK, targetwidth - multilen(target),
-                               target, destname) > "/dev/stderr";
           } else {
             targetmarks[i] = EXECUTEDMARK;
           }
-          changenames[i] = target;
-        }
-        delete changenames;
-        changeaction = "Changed";
-        changestatus = targetstopped;
-        changesize = 0;
-        if (targetasked) {
-          printf "Change the above file names ? (y/n): " > "/dev/stderr";
-          askstatus = system("read ans;case $ans in [Yy]);; *) exit 1;;esac");
-          if (askstatus > 1) {
-            print > "/dev/stderr";
-            exit askstatus;
+          for (j = 2; j < ARGC; j++) {
+            if (ARGV[j] != target) {
+              delete ARGV[j];
+              break;
+            }
           }
         }
-        for (i = 1; i <= targetsize; i++) {
+        changeaction = "Changed";
+        changestatus = 0;
+        changesize = 0;
+        if (targetstopped) {
+          changeaction = "Canceled";
+          changestatus = 1;
+        } else if (targetasked) {
+          for (i = 0; i < targetsize; i++) {
+            target = targetnames[i];
+            targetmark = targetmarks[i];
+            if (targetmark != "") {
+              print targetoutput(targetmark, targetwidth - multilen(target),
+                                 target, destnames[i]) > "/dev/stderr";
+            }
+          }
+          printf "Change the above file names ? (y/n): " > "/dev/stderr";
+          changestatus = \
+            system("read ans; case $ans in [Yy]);; *) exit 1;; esac");
+          if (changestatus > 1) {
+            print > "/dev/stderr";
+            exit changestatus;
+          }
+        }
+        for (i = 0; i < targetsize; i++) {
+          target = targetnames[i];
           targetmark = targetmarks[i];
           if (targetmark == "") {
             continue;
           } else if (targetmark == QUESTIONMARK) {
-            if (askstatus) {
+            if (changestatus) {
               targetmark = CHANGECANDMARK;
             } else {
               targetmark = EXECUTEDMARK;
             }
-          } else if (targetmark == EXECUTEDMARK) {
-            if (targetstopped) {
-              targetmark = CHANGECANDMARK;
-            }
           }
           if (targetmark == EXECUTEDMARK) {
-            if (system("mv --" cmdparam(targets[i]) cmdparam(destnames[i]))) {
+            if (changestatus == 0 && setname(target, "", destnames[i]) != 0) {
               if ('$targetrollback' && changesize > 0) {
-                while (--i > 0) {
-                  destname = destnames[i];
-                  if (destname != "") {
-                    system("mv -f --" cmdparam(destname) cmdparam(targets[i]));
+                while (--i >= 0) {
+                  if (targetmarks[i] != "") {
+                    setname(destnames[i], " -f", targetnames[i]);
                   }
                 }
                 changeaction = "Rolled back";
@@ -486,9 +508,11 @@ dirmain(){
               break;
             }
             changesize++;
+          } else {
+            targetmarks[i] = "";
           }
-          print targetoutput(targetmark, targetwidth - multilen(targets[i]),
-                             targets[i], destnames[i]);
+          print targetoutput(targetmark, targetwidth - multilen(target),
+                             target, destnames[i]);
         }
         if (changesize > 0) {
           if (changesize == 1) {
@@ -556,11 +580,14 @@ do
     if [ $AWKTOCASE = 0 ]; then
       error 0 'the function to uppercase or lowercase is unsupported'
       usage 1
-    elif ! awk -v r="${1#*=}" 'BEGIN { match("", r) }' > /dev/null 2>&1; then
+    fi
+    caseregexcaps=$(escbslash "${1#*=}")
+    if ! (awk -v r="$caseregexcaps" 'BEGIN { match("", r) }' 2>&1 | \
+          awk '{ exit 1 }'); then
       error 0 "unsupported awk's regular expression '${1#*=}'"
       usage 1
     fi
-    regexcapital=$(escbslash "${1#*=}")
+    caseorder=${caseorder}' '${CASECAPSFLAG}
     ;;
   d)
     if [ $DATEREFTIME = 0 ]; then
@@ -581,7 +608,7 @@ do
     sedexpr=$(escbslash "${1#*=}")
     ;;
   f)
-    testopt='-f'
+    targetdir=0
     ;;
   h)
     targetsymlink=1
@@ -638,27 +665,38 @@ do
     errstopped=0
     ;;
   T)
-    target=${1#*=}
+    targetregex=$(escbslash "${1#*=}")
+    if ! (awk -v r="$targetregex" 'BEGIN { match("", r) }' 2>&1 | \
+          awk '{ exit 1 }'); then
+      error 0 "unsupported awk's regular expression '${1#*=}'"
+      usage 1
+    fi
     ;;
   to-lowercase)
     if [ $AWKTOCASE = 0 ]; then
       error 0 'the function to uppercase or lowercase is unsupported'
       usage 1
-    elif ! awk -v r="${1#*=}" 'BEGIN { match("", r) }' > /dev/null 2>&1; then
+    fi
+    caseregextolower=$(escbslash "${1#*=}")
+    if ! (awk -v r="$caseregextolower" 'BEGIN { match("", r) }' 2>&1 | \
+          awk '{ exit 1 }'); then
       error 0 "unsupported awk's regular expression '${1#*=}'"
       usage 1
     fi
-    regextolower=$(escbslash "${1#*=}")
+    caseorder=${caseorder}' '${CASETOLOWERFLAG}
     ;;
   to-uppercase)
     if [ $AWKTOCASE = 0 ]; then
       error 0 'the function to uppercase or lowercase is unsupported'
       usage 1
-    elif ! awk -v r="${1#*=}" 'BEGIN { match("", r) }' > /dev/null 2>&1; then
+    fi
+    caseregextoupper=$(escbslash "${1#*=}")
+    if ! (awk -v r="$caseregextoupper" 'BEGIN { match("", r) }' 2>&1 | \
+          awk '{ exit 1 }'); then
       error 0 "unsupported awk's regular expression '${1#*=}'"
       usage 1
     fi
-    regextoupper=$(escbslash "${1#*=}")
+    caseorder=${caseorder}' '${CASETOUPPERFLAG}
     ;;
   v|verbose)
     targetverbose=1
@@ -688,6 +726,19 @@ do
   esac
   shift
 done
+
+caseorder=$(echo "$caseorder" | \
+            awk '
+              $0 != "" {
+                i = split($0, flags, " ");
+                order = flags[i];
+                while (--i > 0) {
+                  if (index(order, flags[i]) == 0) {
+                    order = flags[i] " " order;
+                  }
+                }
+                printf "%s", order;
+              }')
 
 if [ "$numfmt" != "" -a $padding != 0 ]; then
   numfmt="%0${padding}d"
