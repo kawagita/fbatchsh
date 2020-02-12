@@ -23,10 +23,32 @@ VERSION='1.0'
 
 unalias -a
 
+AWKSTDOUT='/dev/tty'
+AWKSTDERR='/dev/tty'
+AWKUSEHEXEXPR=0
 AWKTOCASE=$(! awk 'BEGIN { toupper(""); tolower("") }' 2> /dev/null; echo $?)
-AWKMATCHBYTES=$(! awk -b 'BEGIN { }' 2>&1 | awk '$0 != "" { exit 1 }'; echo $?)
 
-DATEREFTIME=$(! date -r / > /dev/null 2>&1; echo $?)
+if awk 'BEGIN { print > "/dev/stderr" }' 2> /dev/null; then
+  AWKSTDOUT='/dev/stdout'
+  AWKSTDERR='/dev/stderr'
+fi
+if awk 'BEGIN { if ("!" !~ /\x21/) { exit 1; } }' 2> /dev/null; then
+  AWKUSEHEXEXPR=1
+  if awk -b 'BEGIN { }' 2>&1 | awk '$0 != "" { exit 1 }'; then
+    alias awk='awk -b'
+  fi
+fi
+
+DATEREFTIME=0
+
+STAT=""
+
+if stat -f '%Sm' / > /dev/null 2>&1; then
+  DATEREFTIME=1
+  STAT='stat -f %Sm -t'
+elif date -r / > /dev/null 2>&1; then
+  DATEREFTIME=1
+fi
 
 # Print the usage
 #
@@ -56,9 +78,6 @@ usage(){
   echo '  -N                         append sequential number for the same name'
   echo '      --number-start=NUM     use NUM for starting number instead of 1'
   echo '      --number-padding=NUM   use NUM for the maximum padding zeros'
-  if [ $AWKMATCHBYTES != 0 ]; then
-    echo '  -M, --multibyte            arrange the output of multibyte encodings'
-  fi
   echo '  -p EXPRESSION              use EXPRESSION after adding date or number string'
   echo '  -R, --recursive            change the name in directories recursively'
   echo "      --skip-error           skip target's error in directory"
@@ -259,6 +278,52 @@ dirtrav(){
    return $?
 }
 
+# Code points of Unicode characters formatted as full width
+#
+# 00A7..00A8   Latin-1 Supplement (SECTION SIGN..DIAERESIS,
+# 00B0..00B1    DEGREE SIGN..PLUS-MINUS SIGN,
+# 00B4          ACUTE ACCENT,
+# 00B6          PILCROW SIGN,
+# 00D7          MULTIPLICATION SIGN,
+# 00F7          DIVISION SIGN)
+# 2010         General Punctuation (HYPHEN,
+# 2014..2016    EM DASH..DOUBLE VERTICAL LINE,
+# 2018..2019    LEFT SINGLE QUOTATION MARK..RIGHT SINGLE QUOTATION MARK,
+# 201C..201D    LEFT DOUBLE QUOTATION MARK..RIGHT DOUBLE QUOTATION MARK,
+# 2020..2021    DAGGER..DOUBLE DAGGER,
+# 2025..2026    TWO DOT LEADER..THREE DOT LEADER,
+# 2030          PER MILLE SIGN,
+# 2032..2033    PRIME..DOUBLE PRIME,
+# 203B          REFERENCE MARK)
+# 2100..22FF   Letterlike Symbols, Number Forms, Arrows, Mathematical Operators
+# 2460..24FF   Enclosed Alphanumerics
+# 25A0..27FF   Box Drawing, Miscellaneous Symbols, Supplemental Arrows-A
+# 2E80..A4CF   CJK Radicals Supplement, Kangxi Radicals,
+#              Ideographic Description Characters, CJK Symbols and Punctuation,
+#              Hiragana, Katakana, Bopomofo, Hangul Compatibility Jamo, Kanbun,
+#              Bopomofo Extended, CJK Strokes, Katakana Phonetic Extensions,
+#              Enclosed CJK Letters and Months, CJK Compatibility,
+#              CJK Unified Ideographs Extension A, Yijing Hexagram Symbols,
+#              CJK Unified Ideographs, Yi Syllables, Yi Radicals
+# AC00..D7AF   Hangul Syllables
+# FF01..FF60   Halfwidth and Fullwidth Forms
+#               (FULLWIDTH EXCLAMATION MARK..FULLWIDTH RIGHT WHITE PARENTHESIS)
+# FFE0..FFE6   Halfwidth and Fullwidth Forms
+#               (FULLWIDTH CENT SIGN..FULLWIDTH WON SIGN)
+# F900..FAFF   CJK Compatibility Ideographs
+# 1B000..1B2FF Kana Supplement, Kana Extended-A, Small Kana Extension, Nushu
+
+LOCALECTYPE=$(locale | awk 'sub(/^LC_CTYPE="?/, "") { sub(/"$/, ""); print }')
+LOCALEUTF8=0
+LOCALEEASTASIAN=0
+
+if echo $LOCALECTYPE | awk '$0 !~ /\.(UTF|utf)-?8/ { exit 1 }'; then
+  LOCALEUTF8=1
+  if echo $LOCALECTYPE | awk '$0 !~ /^(ja|ko|zh)_/ { exit 1 }'; then
+    LOCALEEASTASIAN=1
+  fi
+fi
+
 # Process target files or subdirectories in the directory
 #
 # $1 - non-zero if called before return to the parent directory, otherwise, zero
@@ -283,7 +348,6 @@ datefmt=""
 numfmt=""
 numsamenamed=0
 numstart=0
-multibyte=0
 errstopped=1
 
 CASECAPSFLAG=0
@@ -299,18 +363,33 @@ dirmain(){
         -v caseregextoupper="$caseregextoupper" \
         -v caseregextolower="$caseregextolower" \
         -v datefmt="$datefmt" -v numfmt="$numfmt" -v numstart=$numstart '
-      function targetoutput(str, width, target, dest) {
-        str = sprintf("%s %-" width "s", str, target);
-        if (dest != "") {
-          str = str sprintf(" -> %s", dest);
+      function namewidth(s, len) {
+        sub(/.*\n/, "", s);
+        if ('$LOCALEUTF8' && '$AWKUSEHEXEXPR') {
+          if ('$LOCALEEASTASIAN') {
+            len += (gsub(/\xC2[\xA7\xA8\xB0\xB1\xB4\xB6]|\xC3[\x97\xB7]/, "", s) \
+                    + gsub(/\xE2\x80[\x90\x94-\x96\x98\x99\x9C\x9D\xA0\xA1\xA5\xA6\xB0\xB2\xB3\xBB]/, "", s) \
+                    + gsub(/\xE2[\x84-\x8B\x92\x93\x97-\x9E]./, "", s) \
+                    + gsub(/\xE2[\x91\x96][\xA0-\xBF]/, "", s) \
+                    + gsub(/\xE2[\xBA-\xBF].|[\xE3-\xE9]../, "", s) \
+                    + gsub(/\xEA([\x80-\x92\xB0-\xBF].|\x93[\x80-\x8F])|[\xEB\xEC]../, "", s) \
+                    + gsub(/\xED([\x80-\x9D].|\x9E[\x80-\xAF])/, "", s) \
+                    + gsub(/\xEF([\xA4-\xAB\xBC].|\xBD[\x81-\xA0]|\xBF[\xA0-\xA6])/, "", s) \
+                    + gsub(/\xF0\x9B[\x80-\x8B]./, "", s)) * 2;
+          }
+          len += gsub(/[\xC2-\xDE\xDF].|[\xE0-\xEF]..|[\xF0-\xF4].../, "", s);
         }
-        return str;
+        return len + length(s);
       }
-      function multilen(target) {
-        if ('$multibyte') {
-          return gsub(/[^\x01-\x7f]/, "&", target);
+      function showtarget(mark, width, target, dest, device,  margin) {
+        margin = width - namewidth(target);
+        gsub(/\n/, "&  ", target);
+        printf "%s %s", mark, target > device;
+        if (dest != "") {
+          gsub(/\n/, ("&  " sprintf("%" width "s", "") "    "), dest);
+          printf "%" margin "s -> %s", "", dest;
         }
-        return 0;
+        print > device;
       }
       function contains(array, target,  ind) {
         for (ind in array) {
@@ -326,7 +405,11 @@ dirmain(){
       }
       function getdate(target, datefmt,  datecmd) {
         if (datefmt != "") {
-          datecmd = "date -r" cmdparam(target) cmdparam("+" datefmt);
+          if ("'"$STAT"'" != "") {
+            datecmd = "'"$STAT"'" cmdparam(datefmt) cmdparam(target);
+          } else {
+            datecmd = "date -r" cmdparam(target) cmdparam("+" datefmt);
+          }
           datecmd | getline;
           close(datecmd);
           return $0;
@@ -388,9 +471,9 @@ dirmain(){
             if (++targetsize > 1) {
               pl = "s";
             }
-            len = length(fname) + multilen(fname);
-            if (targetwidth < len) {
-              targetwidth = len;
+            fwidth = namewidth(fname);
+            if (targetwidth < fwidth) {
+              targetwidth = fwidth;
             }
           }
         }
@@ -398,22 +481,22 @@ dirmain(){
         targetstopped = 0;
         targetasked = 0;
         for (i = 0; i < targetsize; i++) {
-          target = targetnames[i];
+          targetname = targetnames[i];
           if (! dirwrite) {
             targetmarks[i] = ERRORMARK;
             targetstopped = '$errstopped';
             continue;
           }
           if ('$extignored' && \
-              match(target, /(\.[0-9A-Za-z]+)?\.[0-9A-Za-z]+$/) && \
+              match(targetname, /(\.[0-9A-Za-z]+)?\.[0-9A-Za-z]+$/) && \
               RSTART > 1) {
-            name = substr(target, 1, RSTART - 1);
-            ext = substr(target, RSTART);
+            name = substr(targetname, 1, RSTART - 1);
+            ext = substr(targetname, RSTART);
           } else {
-            name = target;
+            name = targetname;
             ext = "";
           }
-          name = rename(name, "'"$sedexpr"'") getdate(target, datefmt);
+          name = rename(name, "'"$sedexpr"'") getdate(targetname, datefmt);
           for (j = 1; j <= caseflagsize; j++) {
             name = tocase(caseflags[j], name, caseregexes[caseflags[j]]);
           }
@@ -431,7 +514,7 @@ dirmain(){
             name = name sprintf(numfmt, num);
           }
           destname = rename(name, "'"$postexpr"'") ext;
-          if (destname == target) {
+          if (destname == targetname) {
             if ('$targetverbose') {
               targetmarks[i] = UNCHANGEDMARK;
             }
@@ -453,7 +536,7 @@ dirmain(){
             targetmarks[i] = EXECUTEDMARK;
           }
           for (j = 2; j < ARGC; j++) {
-            if (ARGV[j] != target) {
+            if (ARGV[j] == targetname) {
               delete ARGV[j];
               break;
             }
@@ -467,23 +550,20 @@ dirmain(){
           changestatus = 1;
         } else if (targetasked) {
           for (i = 0; i < targetsize; i++) {
-            target = targetnames[i];
-            targetmark = targetmarks[i];
-            if (targetmark != "") {
-              print targetoutput(targetmark, targetwidth - multilen(target),
-                                 target, destnames[i]) > "/dev/stderr";
+            if (targetmarks[i] != "") {
+              showtarget(targetmarks[i], targetwidth, targetnames[i],
+                         destnames[i], "'$AWKSTDERR'");
             }
           }
-          printf "Change the above file names ? (y/n): " > "/dev/stderr";
+          printf "Change the above file names ? (y/n): " > "'$AWKSTDERR'";
           changestatus = \
             system("read ans; case $ans in [Yy]);; *) exit 1;; esac");
           if (changestatus > 1) {
-            print > "/dev/stderr";
+            print > "'$AWKSTDERR'";
             exit changestatus;
           }
         }
         for (i = 0; i < targetsize; i++) {
-          target = targetnames[i];
           targetmark = targetmarks[i];
           if (targetmark == "") {
             continue;
@@ -495,7 +575,8 @@ dirmain(){
             }
           }
           if (targetmark == EXECUTEDMARK) {
-            if (changestatus == 0 && setname(target, "", destnames[i]) != 0) {
+            if (changestatus == 0 && \
+                setname(targetnames[i], "", destnames[i]) != 0) {
               if ('$targetrollback' && changesize > 0) {
                 while (--i >= 0) {
                   if (targetmarks[i] != "") {
@@ -511,8 +592,8 @@ dirmain(){
           } else {
             targetmarks[i] = "";
           }
-          print targetoutput(targetmark, targetwidth - multilen(target),
-                             target, destnames[i]);
+          showtarget(targetmark, targetwidth, targetnames[i],
+                     destnames[i], "'$AWKSTDOUT'");
         }
         if (changesize > 0) {
           if (changesize == 1) {
@@ -560,10 +641,6 @@ link=0
 subdir=""
 optchars='bcd:e:E:fhiIklnNp:RT:v'
 longopts='rollback-directory,no-change,capitalize:,interactive,ignore-extension,keep-running,link,numbering,number-start:,number-padding:,recursive,skip-error,target:,to-lowercase:,to-uppercase:,verbose,help,version'
-if [ $AWKMATCHBYTES != 0 ]; then
-  optchars=${optchars}'M'
-  longopts=${longopts}',multibyte'
-fi
 argval=$(getopt "$optchars" "$longopts" "$@")
 eval set -- "$argval"
 
@@ -593,12 +670,27 @@ do
     if [ $DATEREFTIME = 0 ]; then
       error 0 'the reference of file date is unsupported'
       usage 1
-    elif ! (date -r /dev/null "+${1#*=}" | \
-            awk 'NR > 1 { exit 1 }') > /dev/null 2>&1; then
-      error 0 "unsupported date format '${1#*=}'"
-      usage 1
+    elif [ -n "${1#*=}" ]; then
+      datefmt=$(escbslash "${1#*=}")
+      if ! awk '
+             function cmdparam(param) {
+               gsub(/'\''/, "'\''\\\\&'\''", param);
+               return " '\''" param "'\''";
+             }
+             BEGIN {
+               if ("'"$STAT"'" != "") {
+                 datecmd = "'"$STAT"'" cmdparam(ARGV[1]) " /";
+               } else {
+                 datecmd = "date -r / " cmdparam("+" ARGV[1]);
+               }
+               if (! (datecmd | getline) || (datecmd | getline)) {
+                 exit 1;
+               }
+             }' "$datefmt" 2> /dev/null; then
+        error 0 "unsupported date format '${1#*=}'"
+        usage 1
+      fi
     fi
-    datefmt=$(escbslash "${1#*=}")
     ;;
   e)
     if ! (echo | sed "${1#*=}" > /dev/null 2>&1); then
@@ -647,9 +739,6 @@ do
       usage 1
     fi
     padding=${1#*=}
-    ;;
-  M|multibyte)
-    multibyte=1
     ;;
   p)
     if ! (echo | sed "${1#*=}" > /dev/null 2>&1); then
