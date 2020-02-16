@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Change the name of files or directories.
+# Change the name of files and subdirectories.
 # Copyright (C) 2020 Yoshinori Kawagita.
 #
 # This program is free software; you can redistribute it and/or modify
@@ -72,11 +72,15 @@ usage(){
     exit $1
   fi
   echo "Usage: $PROGRAM [OPTION] DIR..."
-  echo 'Set the name of files or directories in each DIR(s) by standard Unix commands.'
+  echo 'Set the name of files and subdirectories in each DIR(s) by Unix commands.'
   echo
   echo '  -c, --no-change            do not change any files or directories'
-  echo '      --capitalize=REGEX     capitalize all matches of REGEX'
-  echo '  -d FORMAT                  append the modification time output with FORMAT'
+  if [ $AWKCASECHANGED != 0 ]; then
+    echo '      --capitalize=REGEX     capitalize all matches of REGEX'
+  fi
+  if [ $DATEREFTIME != 0 ]; then
+    echo '  -d FORMAT                  append the modification time output with FORMAT'
+  fi
   echo '  -e EXPRESSION              use EXPRESSION to replace file names'
   echo '  -f                         change the name of only files'
   echo '  -h                         change the name of symbolic links'
@@ -92,8 +96,10 @@ usage(){
   echo '  -S, --start-from PATH      resume traversing directories from PATH (with -R)'
   echo "      --skip-error           skip target's error in directory"
   echo '  -T REGEX                   find targets whose name matches REGEX in directory'
-  echo '      --to-lowercase         convert whole name to lowercase'
-  echo '      --to-uppercase         convert whole name to uppercase'
+  if [ $AWKCASECHANGED != 0 ]; then
+    echo '      --to-lowercase         convert whole name to lowercase'
+    echo '      --to-uppercase         convert whole name to uppercase'
+  fi
   echo '  -v, --verbose              show the list of targets in each directory'
   echo '      --help                 display this help and exit'
   echo '      --version              output version information and exit'
@@ -240,44 +246,46 @@ cmpstr() {
 
 # Traverse the directory recursively
 #
-# $1 - the pathname of directory from which the traversal is started
-# $2 - subdirectory patterns which end with a slash separated by spaces
+# $1 - the count of traversing directories
+# $2 - the pathname of root directory to traverse subdirectories
 # process the target in each directory by dirmain function with 0,
 # move to subdirectories matching with the specified pattern and
 # to the parent directory after calling dirmain function with 1,
 # and return 1 or 2 if can't start or fail the traversal, otherwise, 0
 
-travfirstpath=""
+travstartpath=""
+travsubdir=""
 travlinkfollowed=0
 
 dirtrav(){
-  (if [ -n "$1" ]; then
-     if ! cd -L -- "$1" 2> /dev/null; then
+  (count=$1
+   if [ -n "$2" ]; then
+     if ! cd -L -- "$2" 2> /dev/null; then
        exit 1
      fi
-     path=${1%/}/
+     path=${2%/}/
    else
      path='./'
    fi
-   if cmpstr "$(pwd -L)" "$travfirstpath"; then
-     travfirstpath=""
+   if [ -n "$travsubdir" ] && \
+      ! cmpstr "$(pwd -L)" "$travstartpath"; then
+     startpath="$travstartpath"
    fi
    depth=0
-   subdir=$2
    set -- "$path"
 
    while true
    do
-     if [ -z "$travfirstpath" ] && ! dirmain 0; then
+     if [ -z "$startpath" ] && ! dirmain 0; then
        exit 2
      fi
      shift
-     set -- $subdir / "$@"
+     set -- $travsubdir / "$@"
 
      while true
      do
        if [ "$1" = '/' ]; then
-         if [ -z "$travfirstpath" ] && ! dirmain 1; then
+         if [ -z "$startpath" ] && ! dirmain 1; then
            exit 2
          fi
          path=/$path
@@ -295,8 +303,8 @@ dirtrav(){
              ! cmpstr "$(pwd -L)" "$(pwd -P)"); then
            if cd -- "$1" 2> /dev/null; then
              path=$path$1
-             if cmpstr "$(pwd -L)" "$travfirstpath"; then
-               travfirstpath=""
+             if cmpstr "$(pwd -L)" "$startpath"; then
+               startpath=""
              fi
              depth=$(($depth + 1))
              break
@@ -359,8 +367,9 @@ fi
 # Process target files or subdirectories in the directory
 #
 # $1 - 0 or 1 if called at the start or end of traversing subdirectories
-# $depth - the depth of the current directory from the root of traversing
+# $count - the count of the current traversing
 # $path - the pathname to the current directory
+# $depth - the depth of the current directory from the root of traversing
 # return non-zero if can't process the target, otherwise, zero
 
 targetregex=""
@@ -375,18 +384,19 @@ capsregex=""
 sedexpr=""
 postexpr=""
 datefmt=""
-numfmt=""
+numbering=0
 numsamenamed=0
 numstart=0
+numpadding=0
 errstopped=1
 
 dirmain(){
   case $1 in
   0)
     set -- *
-    awk -v dirdepth=$depth -v targetregex="$targetregex" \
+    awk -v dircount=$count -v dirdepth=$depth -v targetregex="$targetregex" \
         -v caseconv=$caseconv -v capsregex="$capsregex" -v datefmt="$datefmt" \
-        -v numfmt="$numfmt" -v numstart=$numstart '
+        -v numstart=$numstart -v numwidth=${numpadding#0} '
       function dispwidth(s, len) {
         sub(/.*\n/, "", s);
         if ('$LOCALEUTF8' && '$AWKUSEHEXEXPR') {
@@ -478,7 +488,7 @@ dirmain(){
         UNCHANGEDMARK = "-";
         ERRORMARK = "E";
         dirpath = ARGV[1];
-        if (dirdepth > 0) {
+        if (dircount > 1 || dirdepth > 0) {
           dirbreak = "\n";
         }
         dirwrite = system("test ! -w ./");
@@ -536,18 +546,18 @@ dirmain(){
             name = tolower(name);
           }
           name = capitalize(name, capsregex) getdate(targetname, datefmt);
-          if (numfmt != "") {
+          if ('$numbering') {
             if ('$numsamenamed') {
               num = filenum[name];
               if (num == "") {
-                num = numstart;
+                num = numstart - 1;
               }
               num++;
               filenum[name] = num;
             } else {
               num++;
             }
-            name = name sprintf(numfmt, num);
+            name = name sprintf("%" numwidth "d", num);
           }
           destname = rename(name, "'"$postexpr"'") ext;
           if (destname == targetname) {
@@ -664,10 +674,14 @@ escbslash(){
 
 # Get options of this program
 
-padding=0
-subdir=""
-optchars='cd:e:fhiIlnNp:RS:T:v'
-longopts='no-change,capitalize:,interactive,ignore-extension,link,numbering,number-start:,number-padding:,recursive,start-from:,skip-error,to-lowercase,to-uppercase,verbose,help,version'
+optchars='ce:fhiIlnNp:RS:T:v'
+longopts='no-change,interactive,ignore-extension,link,numbering,number-start:,number-padding:,recursive,start-from:,skip-error,verbose,help,version'
+if [ $AWKCASECHANGED != 0 ]; then
+  longopts=${longopts}',capitalize:,to-lowercase,to-uppercase'
+fi
+if [ $DATEREFTIME != 0 ]; then
+  optchars=${optchars}'d:'
+fi
 argval=$(getopt "$optchars" "$longopts" "$@")
 eval set -- "$argval"
 
@@ -678,10 +692,6 @@ do
     targetnochange=1
     ;;
   capitalize)
-    if [ $AWKCASECHANGED = 0 ]; then
-      error 0 'the function to uppercase or lowercase is unsupported'
-      usage 1
-    fi
     capsregex=$(escbslash "${1#*=}")
     if ! (awk -v r="$capsregex" 'BEGIN { match("", r) }' 2>&1 | \
           awk '{ exit 1 }'); then
@@ -690,10 +700,7 @@ do
     fi
     ;;
   d)
-    if [ $DATEREFTIME = 0 ]; then
-      error 0 'the reference of file date is unsupported'
-      usage 1
-    elif [ -n "${1#*=}" ]; then
+    if [ -n "${1#*=}" ]; then
       datefmt=$(escbslash "${1#*=}")
       if ! awk '
              function cmdparam(param) {
@@ -738,11 +745,11 @@ do
     travlinkfollowed=1
     ;;
   n|numbering)
-    numfmt='%d'
+    numbering=1
     ;;
   N)
+    numbering=1
     numsamenamed=1
-    numfmt='%d'
     ;;
   number-start)
     if [ "${1#*=}" != 0 ] && \
@@ -750,7 +757,7 @@ do
       error 0 "invalid number start '${1#*=}'"
       usage 1
     fi
-    numstart=$((${1#*=} - 1))
+    numstart=${1#*=}
     ;;
   number-padding)
     if [ "${1#*=}" != 0 ] && \
@@ -758,7 +765,7 @@ do
       error 0 "invalid padding width '${1#*=}'"
       usage 1
     fi
-    padding=${1#*=}
+    numpadding=${1#*=}
     ;;
   p)
     if ! (echo | sed "${1#*=}" > /dev/null 2>&1); then
@@ -768,13 +775,13 @@ do
     postexpr=$(escbslash "${1#*=}")
     ;;
   R|recursive)
-    subdir='*/'
+    travsubdir='*/'
     ;;
   S|start-from)
-    travfirstpath=$(if cd "${1#*=}" 2> /dev/null; then
+    travstartpath=$(if cd "${1#*=}" 2> /dev/null; then
                       pwd -L
                     fi)
-    if [ -z "$travfirstpath" ]; then
+    if [ -z "$travstartpath" ]; then
       error 1 "${1#*=}: No such directory"
     fi
     ;;
@@ -790,17 +797,9 @@ do
     fi
     ;;
   to-lowercase)
-    if [ $AWKCASECHANGED = 0 ]; then
-      error 0 'the function to uppercase or lowercase is unsupported'
-      usage 1
-    fi
     caseconv=-1
     ;;
   to-uppercase)
-    if [ $AWKCASECHANGED = 0 ]; then
-      error 0 'the function to uppercase or lowercase is unsupported'
-      usage 1
-    fi
     caseconv=1
     ;;
   v|verbose)
@@ -832,27 +831,26 @@ do
   shift
 done
 
-if [ "$numfmt" != "" -a $padding != 0 ]; then
-  numfmt="%0${padding}d"
-fi
-
 # Exit if one of rename options is specified
 
 if [ $caseconv = 0 -a -z "$capsregex" -a -z "$sedexpr" -a -z "$postexpr" -a \
-     -z "$datefmt" -a -z "$numfmt" ]; then
+     -z "$datefmt" -a $numbering = 0 ]; then
   exit
 fi
 
-# Change the name of files or directories
+# Change the name of files and subdirectories in each directory
+
+dircount=0
 
 while [ $# != 0 ]
 do
   if [ -d "$1" -o -z "${1%%*/}" ]; then
-    dirtrav "$1" "$subdir"
+    dircount=$(($dircount + 1))
+    dirtrav $dircount "$1"
     status=$?
     case $status in
     0) ;;
-    1) error 0 "${1%/}: Permission denied";;
+    1) printf 'Permission denied -- %s\n' "${1%/}";;
     *) exit $status;;
     esac
   else
