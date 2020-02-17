@@ -82,7 +82,7 @@ usage(){
     echo '  -d FORMAT                  append the modification time output with FORMAT'
   fi
   echo '  -e EXPRESSION              use EXPRESSION to replace file names'
-  echo '  -f                         change the name of only files'
+  echo '  -f                         change the name of items except for directory'
   echo '  -h                         change the name of symbolic links'
   echo '  -i, --interactive          prompt before change'
   echo '  -I, --ignore-extension     ignore file extension when the name is changed'
@@ -505,7 +505,7 @@ dirmain(){
           fname = ARGV[i];
           if (fname ~ targetregex && \
               (fname != "*" || system("test -e" cmdparam("*")) == 0) && \
-              ('$targetdir' || system("test -f" cmdparam(fname)) == 0) && \
+              ('$targetdir' || system("test ! -d" cmdparam(fname)) == 0) && \
               ('$targetsymlink' || system("test ! -h" cmdparam(fname)) == 0)) {
             targetnames[targetsize] = fname;
             targetindexes[targetsize] = i;

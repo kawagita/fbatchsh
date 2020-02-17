@@ -110,17 +110,15 @@ usage(){
   if [ $STATREFTIME != 0 ]; then
     echo '  -a                         change only the access time'
   fi
-  echo '      --abreast              indicate changed time in a line'
+  echo '      --abreast              print changed time of each target in a line'
   echo '  -c, --no-change            do not change any files or directories'
   echo '  -d DATETIME                use DATETIME for specifying the time'
   echo '  -D STRING                  parse STRING and move file or directory time'
-  echo '  -f                         change the time of only files'
+  echo '  -f                         change the time of items except for directory'
   echo '  -h                         change the time of symbolic links'
   echo '  -i, --interactive          prompt before change'
   echo '  -l, --link                 follow the symbolic link (with -R)'
-  if [ $STATREFTIME != 0 ]; then
-    echo '  -m                         change only the modification time'
-  fi
+  echo '  -m                         change only the modification time'
   echo '      --parent-recently      set the parent time to most recently modified file'
   echo "  -r, --reference            use each file's time for specifying the time"
   echo '  -R, --recursive            change the time in directories recursively'
@@ -420,8 +418,8 @@ targetsymlink=0
 timeabreast=0
 timespec=""
 reltimespec='0 0 0 0 0 0 0'
-mtimeset=1
 atimeset=1
+mtimeset=1
 utcset=0
 parentrecently=0
 errstopped=1
@@ -472,7 +470,8 @@ dirmain(){
         }
         return timevalprintf(tm, tmfmt);
       }
-      function showtarget(mark, width, target, num, dests, dev,  str, margin) {
+      function showtarget(mark, width, target, num, tmstrs, tmtypes, device,
+                          str, margin) {
         margin = width - dispwidth(target);
         gsub(/\n/, "&  ", target);
         str = sprintf("%s %s", mark, target);
@@ -480,20 +479,17 @@ dirmain(){
           str = str sprintf("%" margin "s ->", "");
           do {
             if ('$timeabreast') {
-              str = str " " timeprintf(dests[num]);
+              str = str " " timeprintf(tmstrs[num]);
             } else {
               if (str !~ /->$/) {
-                str = str sprintf("\n  %" width "s    Modify:", "", dest);
-              } else if ('$atimeset') {
-                str = str " Access:";
-              } else {
-                str = str " Modify:";
+                str = str sprintf("\n  %" width "s   ", "");
               }
-              str = str " " timeprintf(dests[num], "'"$TIMEOUTFORMAT"'");
+              str = str " " tmtypes[num] ": " \
+                            timeprintf(tmstrs[num], "'"$TIMEOUTFORMAT"'");
             }
           } while (--num > 0);
         }
-        print str > dev;
+        print str > device;
       }
       function cmdparam(param) {
         gsub(/'\''/, "'\''\\\\&'\''", param);
@@ -601,20 +597,19 @@ dirmain(){
           }
           touchopts[++touchsize] = " -m";
           desttime = timespec "'$TIMESEPARATOR'";
+          timesetspec = "Modify ";
         }
         if ('$atimeset') {
-          if ('$STATREFTIME') {
-            datefmt = datefmt "'"$STATATIMEFORMAT$TIMESEPARATOR"'";
-          } else {
-            datefmt = datefmt "'"$DATEFORMAT$TIMESEPARATOR"'";
-          }
+          datefmt = datefmt "'"$STATATIMEFORMAT$TIMESEPARATOR"'";
           if (timespec != "" && '$mtimeset') {
             touchopts[1] = " -ma";
           } else {
             touchopts[++touchsize] = " -a";
           }
           desttime = desttime timespec "'$TIMESEPARATOR'";
+          timesetspec = timesetspec "Access ";
         }
+        split(timesetspec, timetypes);
         split(reltimespec, reltimeval);
         if ('$targetverbose') {
           devout = "'$AWKSTDOUT'";
@@ -628,7 +623,7 @@ dirmain(){
           fname = ARGV[i];
           if (fname ~ targetregex && \
               (fname != "*" || system("test -e" cmdparam("*")) == 0) && \
-              ('$targetdir' || system("test -f" cmdparam(fname)) == 0) && \
+              ('$targetdir' || system("test ! -d" cmdparam(fname)) == 0) && \
               ('$targetsymlink' || system("test ! -h" cmdparam(fname)) == 0)) {
             targetnames[targetsize] = fname;
             targettimes[targetsize] = gettime(fname, datefmt);
@@ -700,7 +695,7 @@ dirmain(){
               }
               timenum = split(desttimes[i], timestrs, "'$TIMESEPARATOR'") - 1;
               showtarget(targetmark, targetwidth, targetnames[i],
-                         timenum, timestrs, "'$AWKSTDERR'");
+                         timenum, timestrs, timetypes, "'$AWKSTDERR'");
             }
           }
           printf "Change the above file times ? (y/n): " > "'$AWKSTDERR'";
@@ -731,12 +726,12 @@ dirmain(){
                       targetname = targetnames[i];
                       if (targetname != "") {
                         split(targettimes[i], timestrs, "'$TIMESEPARATOR'");
-                        num = 0;
+                        num = 1;
                         if ('$mtimeset') {
                           settime(targetname, " -m", timestrs[num++]);
                         }
                         if ('$atimeset') {
-                          settime(targetname, " -a", timestrs[num++]);
+                          settime(targetname, " -a", timestrs[num]);
                         }
                       }
                     }
@@ -750,7 +745,7 @@ dirmain(){
               targetnames[i] = "";
             }
             showtarget(targetmark, targetwidth, targetname,
-                       timenum, timestrs, devout);
+                       timenum, timestrs, timetypes, devout);
           }
         }
         if (size > 0) {
@@ -1037,10 +1032,10 @@ fi
 actime=0
 modtime=0
 reftime=0
-optchars='cd:D:fhilrRS:t:T:v'
+optchars='cd:D:fhilmrRS:t:T:v'
 longopts='abreast,no-change,interactive,link,parent-recently,reference,recursive,start-from:,skip-error,verbose,help,version'
 if [ $STATREFTIME != 0 ]; then
-  optchars=${optchars}'am'
+  optchars=${optchars}'a'
 fi
 if [ $TOUCHSETTZ != 0 ]; then
   longopts=${longopts}',utc'
