@@ -1,7 +1,7 @@
 fbatchsh
 ========
 
-These shell scripts are batch utility for files or directories. Directory name is specified on the last of a command line. All items are targeted in that directory but its can be selected by name which matches the pattern with `-T`. And, subdirectories are traversed with `-R`. If an error occurred, these reverse all changes in directory and stop traversing but it can be resumed with `-S`. See the more information with `--help`.
+These shell scripts are batch utility for files or directories. Directory name is specified on the last of command line. All entries are targeted in that directory but its can be selected by name which matches the extended regular expression with `-T`. And, subdirectories are traversed with `-R`. If an error occurred, these scripts reverse all changes in directory and stop traversing but it can be resumed with `-S` later. See the more information with `--help`.
 
 #### chfname
 
@@ -9,7 +9,11 @@ These shell scripts are batch utility for files or directories. Directory name i
 
 #### chftime
 
-`chftime.sh` is a converter of file and directory times. Changing the access or modification time by a specific time or relative date string, and setting the parent time to the most recently modified file or subdirectory is provided.
+`chftime.sh` is a converter of file and directory times. Changing the modification or access time by a specific time or relative date string, and setting the parent time to the most recently modified file or subdirectory is provided.
+
+#### lsftime
+
+`lsftime.sh` is a script to list the time information of directory contents. Displaying the modification, access, status change, or birth (if possible) time between a specific interval is provided.
 
 ## License
 
