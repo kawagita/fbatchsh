@@ -28,8 +28,8 @@ AWKSTDERR='/dev/tty'
 AWKUSEHEXEXPR=0
 AWKCAPITALIZED=0
 
-FILEUPPERCASE='A-Z'
-FILELOWERCASE='a-z'
+FILEUPPERSET='A-Z'
+FILELOWERSET='a-z'
 FILECASESENSITIVE=1
 
 if awk 'BEGIN { print > "/dev/stderr" }' 2> /dev/null; then
@@ -121,7 +121,7 @@ usage(){
   echo 'Set the name of files and subdirectories in each DIR(s) by Unix commands.'
   echo 'If no DIR, change in the current directory.'
   echo
-  echo '  -A, --almost-all           do not change implied . and ..'
+  echo '  -A, --all                  do not ignore entries starting with .'
   echo '  -c, --no-change            do not change any files or subdirectories'
   if [ $AWKCAPITALIZED != 0 ]; then
     echo '      --capitalize=REGEX     capitalize all matches of REGEX'
@@ -448,10 +448,10 @@ targetdir=1
 targetsymlink=0
 targetclassify=0
 extignored=0
+sublf='\n'
 subexpr=""
 postexpr=""
 trexpr=""
-trlf='\n'
 fromcase="";
 tocase="";
 capsregex=""
@@ -558,29 +558,29 @@ dirmain(){
       function setname(src, dest, opt) {
         return system("mv" opt " --" cmdparam(src) cmdparam(dest));
       }
-      function rename(names, size, repexpr, set1, set2,  repargv, repcmd) {
+      function rename(names, size, renexpr, set1, set2,  renargv, rencmd) {
         while (size > 0) {
-          repargv = cmdparam(names[size--]) repargv;
+          renargv = cmdparam(names[size--]) renargv;
         }
-        repcmd = "printf" cmdparam("%s\\0") repargv " | " \
+        rencmd = "printf" cmdparam("%s\\0") renargv " | " \
                  "tr" cmdparam("\n\\0") cmdparam("\\0\n");
-        if (repexpr != "") {
-          repcmd = repcmd " | sed -e " cmdparam("s" repexpr);
+        if (renexpr != "") {
+          rencmd = rencmd " | sed -e " cmdparam("s" renexpr);
         }
         if (set1 != "" && set2 == "") {
-          if (repexpr == "") {
-            repcmd = repcmd " | sed ";
+          if (renexpr == "") {
+            rencmd = rencmd " | sed ";
           }
-          repcmd = repcmd " -e " cmdparam("y" set1);
+          rencmd = rencmd " -e " cmdparam("y" set1);
           set1 = "";
         }
-        repcmd = repcmd " | tr" cmdparam("/\\0" set1) cmdparam(" /" set2);
+        rencmd = rencmd " | tr" cmdparam("/\\0" set1) cmdparam(" /" set2);
         size = 1;
-        while (repcmd | getline) {
-          sub(/\//, "'"$trlf"'");
+        while (rencmd | getline) {
+          sub(/\//, "'"$sublf"'");
           names[size++] = $0;
         }
-        close(repcmd);
+        close(rencmd);
       }
       function capitalize(name, regex,  rstr) {
         rstr = name;
@@ -602,7 +602,7 @@ dirmain(){
         UNCHANGEDMARK = "-";
         ERRORMARK = "E";
         dirpath = ARGV[1];
-        if (dircount > 1 || dirdepth > 0) {
+        if (dircount > 1 || dirdepth > 0 || '${FBATCHSHDEBUG:-0}') {
           dirbreak = "\n";
         }
         if (system("test -w ./") != 0) {
@@ -623,12 +623,12 @@ dirmain(){
             fileindexes[++fsize] = i;
           }
         }
-        if ('${FBATCHSHDEBUG:-0}') {
-          printf dirbreak > deverr;
-        }
         targetwidth = 0;
         targetsize = 0;
         if (fsize > 0) {
+          if ('${FBATCHSHDEBUG:-0}') {
+            print "" > deverr;
+          }
           for (i = 1; i <= fsize; i++) {
             fileargv = fileargv cmdparam(ARGV[fileindexes[i]]);
           }
@@ -645,23 +645,22 @@ dirmain(){
             }
             fdataindex = index(fdata[i], "'$FIELDSEPARATOR'");
             split(substr(fdata[i], 1, fdataindex - 1), fileinfo);
-            ftype = substr(fileinfo[1], 1, 1);
-            fmode = substr(fileinfo[1], 2, 9);
+            fmode = fileinfo[1];
             ftime = substr(fdata[i], fdataindex + 1);
             delete fdata[i];
             indicator = "";
-            if (ftype == "d") {
+            if (fmode ~ /^d/) {
               if (! '$targetdir') {
                 continue;
               }
               indicator = "/";
-            } else if (ftype == "l") {
+            } else if (fmode ~ /^l/) {
               if (! '$targetsymlink' || \
                   (! '$targetdir' && system("test -d" cmdparam(fname)) == 0)) {
                 continue;
               }
               indicator = "@";
-            } else if (ftype != "-") {
+            } else if (fmode !~ /^-/) {
               continue;
             } else if (index(fmode, "x") > 0) {
               indicator = "*";
@@ -671,7 +670,7 @@ dirmain(){
             targetindicators[targetsize] = indicator;
             targetindexes[targetsize] = fileindex;
             if ('$extignored' && \
-                match(fname, /(\.[0-9A-Z_a-z]+)?\.[0-9A-Z_a-z]+$/) && \
+                match(fname, /(\.[0-9A-Z_a-z]+)*\.[0-9A-Z_a-z]+$/) && \
                 RSTART > 1) {
               convnames[targetsize] = substr(fname, 1, RSTART - 1);
               convexts[targetsize] = substr(fname, RSTART);
@@ -740,22 +739,25 @@ dirmain(){
             targetstopped = '$errstopped';
           } else if (targetnames[i] == convnames[i]) {
             targetmarks[i] = UNCHANGEDMARK;
-          } else if ((! '$targetdot' && convnames[i] ~ /^\./) || \
-                     indexof(changednames, convnames[i]) > 0 || \
-                     indexof(ARGV, convnames[i]) > 0) {
-            targetmarks[i] = ERRORMARK;
-            targetstopped = '$errstopped';
-          } else {
-            if ('$targetnochange') {
-              targetmarks[i] = CHANGECANDMARK;
-            } else if ('$targetprompt') {
-              targetmarks[i] = QUESTIONMARK;
-              targetasked = 1;
+          } else { 
+            fileindex = indexof(ARGV, convnames[i]);
+            if ((! '$targetdot' && convnames[i] ~ /^\./) || \
+                (fileindex > 0 && fileindex != targetindexes[i]) || \
+                indexof(changednames, convnames[i]) > 0) {
+              targetmarks[i] = ERRORMARK;
+              targetstopped = '$errstopped';
             } else {
-              targetmarks[i] = EXECUTEDMARK;
+              if ('$targetnochange') {
+                targetmarks[i] = CHANGECANDMARK;
+              } else if ('$targetprompt') {
+                targetmarks[i] = QUESTIONMARK;
+                targetasked = 1;
+              } else {
+                targetmarks[i] = EXECUTEDMARK;
+              }
+              changednames[i] = convnames[i];
+              delete ARGV[targetindexes[i]];
             }
-            changednames[i] = convnames[i];
-            delete ARGV[targetindexes[i]];
           }
           delete targetindexes[i];
         }
@@ -792,7 +794,7 @@ dirmain(){
           if (targetmarks[i] == EXECUTEDMARK) {
             if (status == 0 && setname(targetname, changednames[i]) != 0) {
               if (size > 0) {
-                while (--i >= 0) {
+                while (--i > 0) {
                   targetname = targetnames[i];
                   if (targetname != "") {
                     setname(changednames[i], targetname, " -f");
@@ -831,6 +833,16 @@ dirmain(){
   return $?
 }
 
+# Return 0 if parameters are not empty and don't include LFs, otherwise, 1
+#
+# $@ - parameters checked whether are empty or include LFs
+
+noemptylf(){
+  return $( (echo 1; printf '%s\0' "$@") | \
+            tr ' \0' '\t ' | \
+            sed '1 { x; d; }; $ { /  / { x; p; }; d; }; x; q')
+}
+
 # Escape backslashes for the specified format or expression if the character
 # preceded by a backslash treat as one literal by awk command.
 #
@@ -859,10 +871,24 @@ escbslash0n(){
   escbslash "$1" 'n' 'o00[^1-7]' 'o0[^1-7]' 'o0$' 'x0[^1-9A-Fa-f]' 'x0$'
 }
 
+
 # Get options of this program
 
+upperset=$(escbslash0n "$FBATCHSHUPPERSET")
+lowerset=$(escbslash0n "$FBATCHSHLOWERSET")
+
+if noemptylf "$FBATCHSHUPPERSET" "$FBATCHSHLOWERSET" && \
+   (echo | tr "$upperset" "$lowerset" > /dev/null 2>&1); then
+  FILEUPPERSET=$FILEUPPERSET$upperset
+  FILELOWERSET=$FILELOWERSET$lowerset
+fi
+if noemptylf "$FBATCHSHSUBLF" && \
+   awk 'BEGIN { sub(/\//, "'"$FBATCHSHSUBLF"'") }' 2> /dev/null; then
+  sublf="$FBATCHSHSUBLF"
+fi
+  
 optchars='AcfFhiIln:Np:Rs:S:T:vy:'
-longopts='almost-all,no-change,classify,interactive,ignore-extension,link,number-start:,quiet,recursive,resume-from:,skip-error,to-lowercase,to-uppercase,verbose,help,version'
+longopts='all,no-change,classify,interactive,ignore-extension,link,number-start:,quiet,recursive,resume-from:,skip-error,to-lowercase,to-uppercase,verbose,help,version'
 if [ $AWKCAPITALIZED != 0 ]; then
   longopts=${longopts}',capitalize:'
 fi
@@ -876,37 +902,40 @@ eval set -- "$argval"
 while [ $# != 0 ]
 do
   case ${1%%=*} in
-  A|almost-all)
+  A|all)
     targetdot=1
     ;;
   c|no-change)
     targetnochange=1
     ;;
   capitalize)
-    capsregex=$(escbslash "${1#*=}")
-    if ! (awk -v r="$capsregex" 'BEGIN { match("", r) }' 2>&1 | \
-          awk '{ exit 1 }'); then
-      error 0 "unsupported awk's regular expression '${1#*=}'"
-      usage 1
+    capsregex=$(escbslash0n "${1#*=}")
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || [ -z "$capsregex" ] || \
+         ! awk -v r="$capsregex" 'BEGIN { match("", r) }' 2> /dev/null; then
+        error 0 "unsupported awk's regular expression '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   d)
     datefmt=$(escbslash "${1#*=}")
-    if [ -z "$datefmt" ] || \
-       ! awk '
-           function cmdparam(param) {
-             gsub(/'\''/, "'\''\\\\&'\''", param);
-             return " '\''" param "'\''";
-           }
-           BEGIN {
-             datecmd = "date " cmdparam("+" ARGV[1]);
-             if (! (datecmd | getline) || \
-                 $0 ~ /\t|\// || (datecmd | getline)) {
-               exit 1;
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || \
+         ! awk -v fmt="$datefmt" '
+             function cmdparam(param) {
+               gsub(/'\''/, "'\''\\\\&'\''", param);
+               return " '\''" param "'\''";
              }
-           }' "$datefmt"; then
-      error 0 "invalid date format '${1#*=}'"
-      usage 1
+             BEGIN {
+               cmd = "date " cmdparam("+" fmt);
+               if (! (cmd | getline) || $0 ~ /\t|\// || (cmd | getline)) {
+                 exit 1;
+               }
+             }'; then
+        error 0 "unsupported date format '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   f)
@@ -929,11 +958,12 @@ do
     ;;
   n)
     numfmt=$(escbslash0n "${1#*=}")
-    if [ -z "$numfmt" ] || \
-       ! (printf '%s' "${1#*=}" | \
-          awk '{ sprintf($0, 0); if (NR > 1) { exit 1; } }') 2> /dev/null; then
-      error 0 "invalid number format '${1#*=}'"
-      usage 1
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || [ -z "$numfmt" ] || \
+         ! awk -v fmt="$numfmt" 'BEGIN { sprintf(fmt, 0) }' 2> /dev/null; then
+        error 0 "unsupported number format '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   N)
@@ -942,18 +972,19 @@ do
   number-start)
     if [ "${1#*=}" != 0 ] && \
        ! expr "${1#*=}" : '[1-9][0-9]*$' > /dev/null 2>&1; then
-      error 0 "invalid number start '${1#*=}'"
+      error 0 "invalid number '${1#*=}'"
       usage 1
     fi
     numstart=${1#*=}
     ;;
   p)
     postexpr=$(escbslash0n "${1#*=}")
-    if [ -z "$postexpr" ] || \
-       ! (printf '%s' "${1#*=}" | awk 'NR > 1 { exit 1 }') || \
-       ! (echo | sed "s${1#*=}" > /dev/null 2>&1); then
-      error 0 "unsupported sed expression '${1#*=}'"
-      usage 1
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || [ -z "$postexpr" ] || \
+         ! (echo | sed "s$postexpr" > /dev/null 2>&1); then
+        error 0 "unsupported sed expression '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   quiet)
@@ -964,10 +995,12 @@ do
     ;;
   s)
     subexpr=$(escbslash0n "${1#*=}")
-    if ! (echo | sed "s${1#*=}" > /dev/null 2>&1) || \
-       [ -z "$subexpr" ] || ! (echo "$1" | awk 'NR > 1 { exit 1 }'); then
-      error 0 "unsupported sed expression '${1#*=}'"
-      usage 1
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || [ -z "$subexpr" ] || \
+         ! (echo | sed "s$subexpr" > /dev/null 2>&1); then
+        error 0 "unsupported sed expression '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   S|resume-from)
@@ -984,19 +1017,21 @@ do
     ;;
   T)
     targetregex=$(escbslash "${1#*=}")
-    if ! (awk -v r="$targetregex" 'BEGIN { match("", r) }' 2>&1 | \
-          awk '{ exit 1 }'); then
-      error 0 "unsupported awk's regular expression '${1#*=}'"
-      usage 1
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || \
+         ! awk -v r="$targetregex" 'BEGIN { match("", r) }' 2> /dev/null; then
+        error 0 "unsupported awk's regular expression '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   to-lowercase)
-    fromcase=$FILEUPPERCASE$(escbslash0n "$FBATCHSHTRUPPERCASE")
-    tocase=$FILELOWERCASE$(escbslash0n "$FBATCHSHTRLOWERCASE")
+    fromcase=$FILEUPPERSET
+    tocase=$FILELOWERSET
     ;;
   to-uppercase)
-    fromcase=$FILELOWERCASE$(escbslash0n "$FBATCHSHTRLOWERCASE")
-    tocase=$FILEUPPERCASE$(escbslash0n "$FBATCHSHTRUPPERCASE")
+    fromcase=$FILELOWERSET
+    tocase=$FILEUPPERSET
     ;;
   utc)
     dateutc=1
@@ -1006,10 +1041,12 @@ do
     ;;
   y)
     trexpr=$(escbslash0n "${1#*=}")
-    if ! (echo | sed "y${1#*=}" > /dev/null 2>&1) || \
-       [ -z "$trexpr" ] || ! (echo "$1" | awk 'NR > 1 { exit 1 }'); then
-      error 0 "unsupported sed expression '${1#*=}'"
-      usage 1
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || [ -z "$trexpr" ] || \
+         ! (echo | sed "y$trexpr" > /dev/null 2>&1); then
+        error 0 "unsupported sed expression '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   help)
@@ -1038,13 +1075,6 @@ do
   shift
 done
 
-# Exit if no rename, date, and number option is specified
-
-if [ -z "$subexpr" -a -z "$postexpr" -a -z "$trexpr" -a \
-     -z "$fromcase" -a -z "$capsregex" -a -z "$datefmt" -a -z "$numfmt" ]; then
-  exit
-fi
-
 if [ $targetdot != 0 ]; then
   if [ -n "$travsubdirs" ]; then
     travsubdirs='.*/ '$travsubdirs
@@ -1052,8 +1082,11 @@ if [ $targetdot != 0 ]; then
   targetentries='.* '$targetentries
 fi
 
-if ! (escbslash0n | awk 'length($0) > 0 { exit 1 }'); then
-  trlf="$FBATCHSHTRLF"
+# Exit if no rename, date, and number option is specified
+
+if [ -z "$subexpr" -a -z "$postexpr" -a -z "$trexpr" -a \
+     -z "$fromcase" -a -z "$capsregex" -a -z "$datefmt" -a -z "$numfmt" ]; then
+  exit
 fi
 
 # Change the name of files and subdirectories in each directory

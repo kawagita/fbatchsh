@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Change the access or modification time of files and subdirectories.
+# Change the modification or access time of files and subdirectories.
 # Copyright (C) 2020 Yoshinori Kawagita.
 #
 # This program is free software; you can redistribute it and/or modify
@@ -38,55 +38,120 @@ if awk 'BEGIN { if ("!" !~ /\x21/) { exit 1; } }' 2> /dev/null; then
   fi
 fi
 
-TIMEDATAFORMAT='%04d %02d %02d %02d %02d %02d %09d'
-TIMEOUTFORMAT='%04d-%02d-%02d %02d:%02d:%02d'
-TIMEABRESTFORMAT='%04d/%02d/%02d %02d:%02d'
+TIMEFORMAT='%04d-%02d-%02d %02d:%02d:%02d'
+TIMESHORTFORMAT='%04d/%02d/%02dT%02d:%02d'
 TIMESEPARATOR='/'
 
+FIELDTIMEFORMAT='%04d %02d %02d %02d %02d %02d %09d'
+FIELDTIMEZERO=$(printf "$FIELDTIMEFORMAT" 0 0 0 0 0 0)
+FIELDSEPARATOR=','
+FIELDMTIME=1
+FIELDATIME=2
+FIELDTIMECHARS='ma'
+
 DATEREFTIME=0
+DATEREFNSEC=0
 DATEFORMAT='%Y %m %d %H %M %S 000000000'
-DATETZNUM=$(date +%z 2> /dev/null | awk '{ sub(/^%?z$/, ""); print }')
-DATETZNAME=$(date +%Z 2> /dev/null | awk '{ sub(/^%?Z$/, ""); print }')
+DATEYEARREGEX='(19|[2-9][0-9])[0-9][0-9]'
+DATETZREGEX='[-+][0-9][0-9][0-9][0-9]'
+DATETZ=$(date +%z 2> /dev/null | sed "/^${DATETZREGEX}\$/!d")
+DATETZNAME=$(date +%Z 2> /dev/null | sed '/^[A-Z][A-Z][A-Z][A-Z]*$/!d')
 
-TOUCHTIMEOPT=' -t'
-TOUCHFORMAT='%04d%02d%02d%02d%02d.%02d'
+TOUCHTIMEOPTION=' -t'
+TOUCHTIMEFORMAT='%04d%02d%02d%02d%02d.%02d'
 TOUCHSETTZ=0
-TOUCHSETNSEC=0
 
+if date -r / "+$DATEFORMAT" > /dev/null 2>&1; then
+  DATEREFTIME=1
+fi
 if touch -d '2020-01-01T00:00:00Z' -c /tmp/test 2> /dev/null; then
-  TOUCHTIMEOPT=' -d'
-  TOUCHFORMAT='%04d-%02d-%02dT%02d:%02d:%02d'
+  TOUCHTIMEOPTION=' -d'
+  TOUCHTIMEFORMAT='%04d-%02d-%02dT%02d:%02d:%02d'
   TOUCHSETTZ=1
   if expr $(date '+%N') : '[0-9][0-9]*$' > /dev/null 2>&1 && \
      touch -d '2020-01-01T00:00:00.1' -c /tmp/test 2> /dev/null; then
+    DATEREFNSEC=1
     DATEFORMAT=${DATEFORMAT% 0*}' %N'
-    TOUCHFORMAT=${TOUCHFORMAT}'.%d'
-    TOUCHSETNSEC=1
+    TOUCHTIMEFORMAT=$TOUCHTIMEFORMAT'.%09d'
   fi
 fi
 
 STATREFTIME=0
 STAT=""
-STATATIMEFORMAT=""
-STATMTIMEFORMAT=""
-
-REPLACEDELIMTOSPC=""
+STATMTIME=""
+STATFILTER=""
+STATTIMEFILTER=""
+STATNOTIMEFILTER=""
 
 if stat -c '%y' / > /dev/null 2>&1; then
-  DATEREFTIME=1
   STATREFTIME=1
-  STAT='stat -c'
-  STATATIMEFORMAT='%x'
-  STATMTIMEFORMAT='%y'
-  REPLACEDELIMTOSPC=" | sed 's/[^0-9/]/ /g; s/  [0-9][0-9][0-9][0-9]//g'"
+  STAT="stat -c '%A %u %g$FIELDSEPARATOR%y$TIMESEPARATOR%x'"
+  STATMTIME='stat -c %y'
+  STATFILTER=" | sed -e 's/ $DATETZREGEX//g'"
 elif stat -f '%Sm' / > /dev/null 2>&1; then
-  DATEREFTIME=1
   STATREFTIME=1
-  STAT="stat -t +'$DATEFORMAT' -f"
-  STATATIMEFORMAT='%Sa'
-  STATMTIMEFORMAT='%Sm'
-elif date -r / "+$DATEFORMAT" > /dev/null 2>&1; then
-  DATEREFTIME=1
+  STAT="stat -t '$DATEFORMAT' -f"
+  STATMTIME=$STAT' %Sm'
+  STAT=$STAT" '%Sp %6Du %6Dg$FIELDSEPARATOR%Sm$TIMESEPARATOR%Sa'"
+fi
+
+LSREFTIME=0
+LS='ls -fdnql'
+LSOPTION=""
+LSTIMEOPTCHARS=""
+LSFILTER=" | sed -e 's/[1-9][0-9]*//' -e 's/[0-9][0-9]* /$FIELDSEPARATOR/3'"
+LSTIMEFILTER=" -e 's/ $DATETZREGEX .*//' -e 's/  *//3'"
+LSNOTIMEFILTER=" -e 's/ *$FIELDSEPARATOR.*$/$FIELDSEPARATOR/'"
+LSNOMODEFILTER=" -e 's/^[-A-Za-z][-+A-Za-z]* [ 0-9]*$FIELDSEPARATOR//'"
+
+if ls --full-time / > /dev/null 2>&1; then
+  LSREFTIME=1
+  LSOPTION=' --full-time'
+  LSTIMEOPTCHARS='u'
+elif ls -E / > /dev/null 2>&1; then
+  LSREFTIME=1
+  LSOPTION=' -E'
+  LSTIMEOPTCHARS='u'
+fi
+
+if [ ${FBATCHSHDEBUG:-0} -ge 2 ]; then
+  STATREFTIME=0
+  if [ ${FBATCHSHDEBUG:-0} -ge 3 ]; then
+    LSREFTIME=0
+  fi
+fi
+
+if [ $STATREFTIME != 0 ]; then
+  LSREFTIME=0
+  DATEREFTIME=0
+else
+  if [ $LSREFTIME != 0 ]; then
+    DATEREFTIME=0
+  else
+    FIELDATIME=0
+    FIELDTIMECHARS='m'
+  fi
+  STAT=$LS$LSOPTION
+  STATFILTER=$LSFILTER
+  STATTIMEFILTER=$LSTIMEFILTER
+  STATNOTIMEFILTER=$LSNOTIMEFILTER
+fi
+
+GETTIME=""
+GETTIMEFILTER=""
+
+if [ $STATREFTIME != 0 ]; then
+  DATEREFTIME=0
+  GETTIME=$STATMTIME
+  GETTIMEFILTER=$STATFILTER
+elif [ $LSREFTIME != 0 ]; then
+  DATEREFTIME=0
+  GETTIME=$LS$LSOPTION
+  GETTIMEFILTER=$LSFILTER$LSTIMEFILTER$LSNOMODEFILTER" -e 's/[-.:]/ /g'"
+else
+  FIELDATIME=0
+  FIELDTIMECHARS='m'
+  LSFILTER=" | sed 's/ .*$/$FIELDSEPARATOR/'"
 fi
 
 # Print the usage
@@ -99,45 +164,49 @@ usage(){
     echo "Try \`$PROGRAM --help' for more information." 1>&2
     exit $1
   fi
-  echo "Usage: $PROGRAM [OPTION] DIR..."
-  if [ $STATREFTIME != 0 ]; then
-    echo 'Set the access or modification time of files or subdirectories in each DIR(s)'
+  echo "Usage: $PROGRAM [OPTION] [DIR...]"
+  if [ $FIELDATIME != 0 ]; then
+    echo 'Set the modification or access time of files or subdirectories in each DIR(s)'
+    echo 'by Unix commands. If no DIR, change in the current directory.'
   else
-    echo 'Set the modification time of files or subdirectories in each DIR(s)'
+    echo 'Set the modification time of files or subdirectories in each DIR(s) by Unix'
+    echo 'commands. If no DIR, change in the current directory.'
   fi
-  echo 'to the specified time by Unix commands.'
   echo
-  if [ $STATREFTIME != 0 ]; then
+  echo '  -A, --all                  do not ignore entries starting with .'
+  if [ $FIELDATIME != 0 ]; then
     echo '  -a                         change only the access time'
   fi
-  echo '      --abreast              print changed time of each target in a line'
-  echo '  -c, --no-change            do not change any files or directories'
-  echo '  -d DATETIME                use DATETIME for specifying the time'
-  echo '  -D STRING                  parse STRING and move file or directory time'
-  echo '  -f                         change the time of items except for directory'
+  echo '  -c, --no-change            do not change any files or subdirectories'
+  echo '  -d DATETIME                use DATETIME to set file time'
+  echo '  -D STRING                  parse STRING and move specified time'
+  echo '  -f                         change the time of only regular files'
+  echo '  -F, --classify             show file or directory indicator (one of */@)'
   echo '  -h                         change the time of symbolic links'
-  echo '  -i, --interactive          prompt before change'
+  echo '  -i, --interactive          prompt before change in each directory'
   echo '  -l, --link                 follow the symbolic link (with -R)'
   echo '  -m                         change only the modification time'
   echo '      --parent-recently      set the parent time to most recently modified file'
-  echo "  -r, --reference            use each file's time for specifying the time"
+  echo '      --quiet                do not list targets in each directory'
+  echo "  -r, --reference            move each file's time (with -d)"
   echo '  -R, --recursive            change the time in directories recursively'
-  echo '  -S, --start-from PATH      resume traversing directories from PATH (with -R)'
+  echo '  -S, --resume-from=PATH     resume traversing directories from PATH'
   echo "      --skip-error           skip target's error in directory"
-  echo '  -t STAMP                   use STAMP for specifying the time'
-  echo '  -T REGEX                   find targets whose name matches REGEX in directory'
+  echo '  -t STAMP                   use STAMP to set file time'
+  echo '  -T REGEX                   target directory entries whose names match REGEX'
   if [ $TOUCHSETTZ != 0 ]; then
-    echo '      --utc                  set Coordinated Universal Time (UTC)'
+    echo '      --utc                  set file time as UTC time zone'
   fi
-  echo '  -v, --verbose              show the list of targets in each directory'
+  echo '  -v, --verbose              print subdirectories without target'
+  echo '  -1                         print time information per line'
   echo '      --help                 display this help and exit'
   echo '      --version              output version information and exit'
   echo
   echo 'DATETIME or STAMP must be specified with YYYY-MM-DDThh:mm:ss[.frac] of ISO 8601'
-  echo 'format or YYYYMMDDhhmm[.ss] used by -t option of touch command.'
+  echo 'format or YYYYMMDDhhmm[.ss] used by -d or -t option of touch command.'
   echo
   echo '-D option accept STRING as only relative items used by -d option of GNU touch.'
-  echo "Those are ordinal words like 'last', 'this', 'next', 'first', ..., 'twelfth',"
+  echo "These are ordinal words like 'last', 'this', 'next', 'first', ..., 'twelfth',"
   echo "or signed integers with duration words like 'fortnight', 'week', 'year', ...,"
   echo "'second', 'nanosecond' (followed by 'ago' if back). In addition, 'yesterday',"
   echo "'today', 'now', and 'tomorrow' can be specified without other modifiers."
@@ -291,7 +360,7 @@ cmpstr() {
 # and return 1 or 2 if can't start or fail the traversal, otherwise, 0
 
 travstartpath=""
-travsubdir=""
+travsubdirs=""
 travlinkfollowed=0
 
 dirtrav(){
@@ -304,7 +373,7 @@ dirtrav(){
    else
      path='./'
    fi
-   if [ -n "$travsubdir" ] && \
+   if [ -n "$travsubdirs" ] && \
       ! cmpstr "$(pwd -L)" "$travstartpath"; then
      startpath="$travstartpath"
    fi
@@ -317,7 +386,7 @@ dirtrav(){
        exit 2
      fi
      shift
-     set -- $travsubdir / "$@"
+     set -- $travsubdirs / "$@"
 
      while true
      do
@@ -409,27 +478,36 @@ fi
 # $depth - the depth of the current directory from the root of traversing
 # return non-zero if can't process the target, otherwise, zero
 
+targetentries="*"
 targetregex=""
 targetnochange=0
 targetprompt=0
 targetverbose=0
+targetquiet=0
+targetdot=0
 targetdir=1
 targetsymlink=0
-timeabreast=0
+targetclassify=0
+timeutc=0
+timelined=0
+timeorder=${FIELDTIMECHARS%b}
 timespec=""
 reltimespec='0 0 0 0 0 0 0'
-atimeset=1
-mtimeset=1
-utcset=0
-parentrecently=0
+userid=$(id -u)
+groupid=$(id -g)
+termcols=$(tput cols)
 errstopped=1
+parentrecently=0
 
 dirmain(){
   case $1 in
   0)
     set -- *
     awk -v dircount=$count -v dirdepth=$depth -v targetregex="$targetregex" \
-        -v timespec="$timespec" -v reltimespec="$reltimespec" '
+        -v timespec="$timespec" -v reltimespec="$reltimespec" \
+        -v timechars=$FIELDTIMECHARS -v timeorder=$timeorder -v timeperline=1 \
+        -v userid=$userid -v groupid=$groupid -v maxdispwidth=${termcols:-80} \
+        -v devout=$AWKSTDOUT -v deverr=$AWKSTDERR '
       function dispwidth(s, len) {
         sub(/.*\n/, "", s);
         if ('$LOCALEUTF8' && '$AWKUSEHEXEXPR') {
@@ -448,82 +526,127 @@ dirmain(){
         }
         return len + length(s);
       }
-      function timevalprintf(tm, tmfmt) {
-        if (tmfmt == "") {
-          tmfmt = "'"$TIMEDATAFORMAT$TIMESEPARATOR"'";
-        }
-        return sprintf(tmfmt, tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7]);
-      }
-      function timeprintf(tmstr, tmfmt,  tm) {
-        split(tmstr, tm);
-        if (tmfmt == "") {
-          tmfmt = "'"$TIMEABRESTFORMAT"'";
+      function disptime(tmlined, tmstr, tmlabel,  tmfmt, tm) {
+        if (tmlined) {
+          tmfmt = " '"$TIMESHORTFORMAT"'";
         } else {
-          if ('$TOUCHSETNSEC') {
+          tmfmt = "'"$TIMEFORMAT"'";
+          if ('$DATEREFNSEC') {
             tmfmt = tmfmt ".%s";
           }
-          if ('$utcset') {
+          if ('$timeutc') {
             tmfmt = tmfmt " +0000";
           } else {
-            tmfmt = tmfmt " " "'$DATETZNUM'";
+            tmfmt = tmfmt " " "'$DATETZ'";
+          }
+          tmfmt = sprintf(" %-6s: ", tmlabel) tmfmt;
+        }
+        split(tmstr, tm);
+        return strtime(tm, tmfmt);
+      }
+      function disptarget(mark, width, target, tmcols, tmstrs,
+                          str, margin, num) {
+        TIMELABEL['$FIELDMTIME'] = "Modify";
+        TIMELABEL['$FIELDATIME'] = "Access";
+        margin = width - dispwidth(target);
+        if (margin < 0) {
+          margin = 0;
+        }
+        gsub(/\n/, "&  ", target);
+        str = mark " " target;
+        if (tmstrs[1] != "'"$FIELDTIMEZERO"'") {
+          str = str sprintf("%" margin "s ->", "");
+          num = 1;
+          while (tmcols[num] != "") {
+            if (! '$timelined' && str !~ /->$/) {
+              str = str sprintf("\n  %" width "s   ", "");
+            }
+            str = str disptime('$timelined',
+                               tmstrs[tmcols[num]], TIMELABEL[tmcols[num]]);
+            num++;
           }
         }
-        return timevalprintf(tm, tmfmt);
+        return str;
       }
-      function showtarget(mark, width, target, num, tmstrs, tmtypes, device,
-                          str, margin) {
-        margin = width - dispwidth(target);
-        gsub(/\n/, "&  ", target);
-        str = sprintf("%s %s", mark, target);
-        if (num > 0) {
-          str = str sprintf("%" margin "s ->", "");
-          do {
-            if ('$timeabreast') {
-              str = str " " timeprintf(tmstrs[num]);
-            } else {
-              if (str !~ /->$/) {
-                str = str sprintf("\n  %" width "s   ", "");
-              }
-              str = str " " tmtypes[num] ": " \
-                            timeprintf(tmstrs[num], "'"$TIMEOUTFORMAT"'");
-            }
-          } while (--num > 0);
-        }
-        print str > device;
+      function cmdnoerror(cmd) {
+        return "(" cmd " 2>&1;echo $?) | sed '\''${ /0/{ x; p; }; }; x; d'\''";
       }
       function cmdparam(param) {
         gsub(/'\''/, "'\''\\\\&'\''", param);
         return " '\''" param "'\''";
       }
-      function gettime(target, datefmt,  datecmd, cmdfmt, cmdtz) {
-        if ('$STATREFTIME') {
-          if ('$utcset') {
-            cmdtz = "TZ= ";
-          }
-          cmdfmt = cmdtz "'"$STAT"' " datefmt "%s";
-        } else {
-          if ('$utcset') {
-            cmdtz = " -u";
-          }
-          cmdfmt = "date" cmdtz " -r%s '\''+" datefmt "'\''";
+      function getstat(data, statargv,  statcmd, tmutc, size) {
+        if ('$timeutc') {
+          tmutc = "TZ= ";
         }
-        gsub(/%[^s]/, "%&", cmdfmt);
-        datecmd = sprintf(cmdfmt, cmdparam(target)) "'"$REPLACEDELIMTOSPC"'";
-        datecmd | getline;
-        close(datecmd);
-        return $0;
+        statcmd = tmutc "'"$STAT"' --" statargv "'"$STATFILTER"'";
+        if (! '$DATEREFTIME') {
+          statcmd = statcmd "'"$STATTIMEFILTER"'";
+        } else {
+          statcmd = statcmd "'"$STATNOTIMEFILTER"'";
+        }
+        size = 1;
+        while (statcmd | getline) {
+          data[size++] = $0;
+        }
+        close(statcmd);
       }
-      function settime(target, touchopt, tmstr,  tmfmt) {
-        if (touchopt != "") {
-          if ('$targetsymlink') {
-            touchopt = touchopt " -h";
+      function getls(data, lsargv,  lscmd, tmutc, tmoptc, size, num) {
+        if ('$timeutc') {
+          tmutc = "TZ= ";
+        }
+        split("'"$LSTIMEOPTCHARS"'", tmoptc);
+        num = 1;
+        while (tmoptc[num] != "") {
+          lscmd = tmutc "'"$LS"'" tmoptc[num++] "'"$LSOPTION"' --" lsargv \
+                        "'"$LSFILTER$LSTIMEFILTER$LSNOMODEFILTER"'";
+          size = 1;
+          while (lscmd | getline) {
+            data[size] = data[size] "'$TIMESEPARATOR'" $0;
+            size++;
           }
-          tmfmt = "'$TOUCHFORMAT'";
-          if ('$utcset') {
-            tmfmt = tmfmt "Z";
+          close(lscmd);
+        }
+      }
+      function getdate(dateargv,  datecmd, date) {
+        date = "'"$FIELDTIMEZERO"'";
+        datecmd = "date";
+        if ('$timeutc') {
+          datecmd = datecmd " -u";
+        }
+        datecmd = cmdnoerror(datecmd " -r" dateargv " '\'+"$DATEFORMAT"\''");
+        datecmd | getline date;
+        close(datecmd);
+        return date;
+      }
+      function strfiletime(tmstrs, num,  tmfield) {
+        while (num > 1) {
+          tmfield = "'$TIMESEPARATOR'" tmstrs[num--] tmfield;
+        }
+        return tmstrs[1] tmfield;
+      }
+      function strtime(tm, tmfmt) {
+        return sprintf(tmfmt, tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7]);
+      }
+      function settime(target, tmoptc, tmcols, tmstrs,  tmln, tmfmt, tm, num) {
+        if ('$targetsymlink') {
+          tmln = "h";
+        }
+        tmfmt = "'$TOUCHTIMEFORMAT'";
+        if ('$timeutc') {
+          tmfmt = tmfmt "Z";
+        }
+        num = 1;
+        while (tmoptc[num] != "") {
+          if ('${FBATCHSHDEBUG:-0}') {
+            printf "%s %s\n", tmoptc[num], tmstrs[tmcols[num]] > deverr;
           }
-          return system("touch" touchopt "'"$TOUCHTIMEOPT"'" \
-                        " " timeprintf(tmstr, tmfmt) " --" cmdparam(target));
+          split(tmstrs[tmcols[num]], tm);
+          if (system("touch -" tmoptc[num] tmln "'"$TOUCHTIMEOPTION"'" \
+                     " " strtime(tm, tmfmt) " --" cmdparam(target)) != 0) {
+            return 1;
+          }
+          num++;
         }
         return 0;
       }
@@ -585,100 +708,175 @@ dirmain(){
         UNCHANGEDMARK = "-";
         ERRORMARK = "E";
         dirpath = ARGV[1];
-        if (dircount > 1 || dirdepth > 0) {
+        if (dircount > 1 || dirdepth > 0 || '${FBATCHSHDEBUG:-0}') {
           dirbreak = "\n";
         }
-        touchsize = 0;
-        if ('$mtimeset') {
-          if ('$STATREFTIME') {
-            datefmt = "'"$STATMTIMEFORMAT$TIMESEPARATOR"'";
-          } else {
-            datefmt = "'"$DATEFORMAT$TIMESEPARATOR"'";
+        timenum = length(timechars);
+        timecolsize = length(timeorder);
+        timeoptc[1] = timechars;
+        for (i = 1; i <= timecolsize; i++) {
+          timechar = substr(timeorder, i, 1);
+          if (timespec == "") {
+            timeoptc[i] = timechar;
           }
-          touchopts[++touchsize] = " -m";
-          desttime = timespec "'$TIMESEPARATOR'";
-          timesetspec = "Modify ";
+          timecols[i] = index(timechars, timechar);
         }
-        if ('$atimeset') {
-          datefmt = datefmt "'"$STATATIMEFORMAT$TIMESEPARATOR"'";
-          if (timespec != "" && '$mtimeset') {
-            touchopts[1] = " -ma";
-          } else {
-            touchopts[++touchsize] = " -a";
-          }
-          desttime = desttime timespec "'$TIMESEPARATOR'";
-          timesetspec = timesetspec "Access ";
+        timewidth = length(disptime('$timelined', "'"$FIELDTIMEZERO"'"));
+        if ('$timelined') {
+          timeperline = timecolsize;
         }
-        split(timesetspec, timetypes);
-        split(reltimespec, reltimeval);
-        if ('$targetverbose') {
-          devout = "'$AWKSTDOUT'";
-        } else {
+        maxdispwidth -= timewidth * timeperline + 6;
+        if ('$targetquiet') {
           devout = "/dev/null";
         }
         delete ARGV[1];
+        for (i = 2; i < ARGC; i++) {
+          if (ARGV[i] ~ targetregex && (ARGV[i] != "." && ARGV[i] != "..") && \
+              (ARGV[i] != "*" || system("test -e" cmdparam("*")) == 0)) {
+            fileindexes[++fsize] = i;
+          }
+        }
         targetwidth = 0;
         targetsize = 0;
-        for (i = 2; i < ARGC; i++) {
-          fname = ARGV[i];
-          if (fname ~ targetregex && \
-              (fname != "*" || system("test -e" cmdparam("*")) == 0) && \
-              ('$targetdir' || system("test ! -d" cmdparam(fname)) == 0) && \
-              ('$targetsymlink' || system("test ! -h" cmdparam(fname)) == 0)) {
+        if (fsize > 0) {
+          if ('${FBATCHSHDEBUG:-0}') {
+            print "" > deverr;
+          }
+          for (i = 1; i <= fsize; i++) {
+            fileargv = fileargv cmdparam(ARGV[fileindexes[i]]);
+          }
+          getstat(fdata, fileargv);
+          if ('$LSREFTIME') {
+            getls(fdata, fileargv);
+          }
+          for (i = 1; i <= fsize; i++) {
+            fileindex = fileindexes[i];
+            fname = ARGV[fileindex];
+            delete fileindexes[i];
+            if ('$DATEREFTIME') {
+              fdata[i] = fdata[i] getdate(cmdparam(fname), datefmt);
+            }
+            if ('${FBATCHSHDEBUG:-0}') {
+              printf "%-'${termcols:-80}'s%s\n", fdata[i] "  ", fname > deverr;
+            }
+            fdataindex = index(fdata[i], "'$FIELDSEPARATOR'");
+            split(substr(fdata[i], 1, fdataindex - 1), fileinfo);
+            fmode = fileinfo[1];
+            fpermindex = 2;
+            if (fileinfo[2] != userid) {
+              fpermindex += 3;
+              if (fileinfo[3] != groupid) {
+                fpermindex += 3;
+              }
+            }
+            fpermission = substr(fmode, fpermindex, 3);
+            ftime = substr(fdata[i], fdataindex + 1);
+            gsub(/[-:.]/, " ", ftime);
+            delete fdata[i];
+            indicator = "";
+            if (index(fpermission, "w") == 0) {
+              continue;
+            } else if (fmode ~ /^d/) {
+              if (! '$targetdir') {
+                continue;
+              }
+              indicator = "/";
+            } else if (fmode ~ /^l/) {
+              if (! '$targetsymlink' || \
+                  (! '$targetdir' && system("test -d" cmdparam(fname)) == 0)) {
+                continue;
+              }
+              indicator = "@";
+            } else if (fmode !~ /^-/) {
+              continue;
+            } else if (index(fmode, "x") > 0) {
+              indicator = "*";
+            }
+            targetsize++;
             targetnames[targetsize] = fname;
-            targettimes[targetsize] = gettime(fname, datefmt);
-            if (++targetsize > 1) {
+            targettimes[targetsize] = ftime;
+            targetindicators[targetsize] = indicator;
+            if (targetsize > 1) {
               pl = "s";
+            }
+            if ('$targetclassify') {
+              fname = fname indicator;
             }
             width = dispwidth(fname);
             if (targetwidth < width) {
-              targetwidth = width;
+              if (width > maxdispwidth) {
+                targetwidth = maxdispwidth;
+              } else {
+                targetwidth = width;
+              }
             }
           }
-          delete ARGV[i];
         }
-        printf dirbreak "%s:\n%d target%s\n", dirpath, targetsize, pl > devout;
+        if (targetsize == 0 && ! '$targetverbose') {
+          exit 0;
+        }
+        printf dirbreak dirpath ":\n%d target%s\n", targetsize, pl > devout;
         targetstopped = 0;
         targetasked = 0;
-        for (i = 0; i < targetsize; i++) {
-          targetname = targetnames[i];
-          targettime = targettimes[i];
-          if (system("test -w" cmdparam(targetname)) != 0) {
+        for (num = 1; num <= timenum; num++) {
+          TIMEFIELDZEROS[num] = "'"$FIELDTIMEZERO"'";
+          timefields[num] = timespec;
+        }
+        split(reltimespec, reltimeval);
+        for (i = 1; i <= targetsize; i++) {
+          if (targettimes[i] ~ /'"$FIELDTIMEZERO"'/) {
             targetmarks[i] = ERRORMARK;
-            targetstopped = '$errstopped';
+            convtimes[i] = strfiletime(TIMEFIELDZEROS, timenum);
             continue;
           }
-          if (timespec == "" || i < 1) {
-            if (timespec == "") {
-              desttime = targettime;
+          if (timespec != "") {
+            split(targettimes[i], convfields, "'$TIMESEPARATOR'");
+            j = timecolsize;
+            do {
+              convfields[timecols[j]] = timefields[timecols[j]];
+            } while (--j > 0);
+            convtimes[i] = strfiletime(convfields, timenum);
+            if (i > 1) {
+              targetmarks[i] = targetmarks[1];
+              continue;
             }
-            timenum = split(desttime, timestrs, "'$TIMESEPARATOR'") - 1;
-            desttime = "";
-            while (timenum > 0) {
-              split(timestrs[timenum--], timeval);
-              for (j = 1; j <= 7; j++) {
-                calctime(timeval, j, reltimeval[j]);
-              }
-              desttime = timevalprintf(timeval) desttime;
-            }
-          }
-          if (desttime == targettime) {
-            targetmarks[i] = UNCHANGEDMARK;
-            continue;
-          }
-          desttimes[i] = desttime;
-          if (desttime ~ /(^|\/)(0|1[0-8]|[1-9][0-9][0-9][0-9][0-9]+)/) {
-            targetmarks[i] = ERRORMARK;
-            targetstopped = '$errstopped';
-            continue;
-          } else if ('$targetnochange') {
-            targetmarks[i] = CHANGECANDMARK;
-          } else if ('$targetprompt') {
-            targetmarks[i] = QUESTIONMARK;
-            targetasked = 1;
           } else {
-            targetmarks[i] = EXECUTEDMARK;
+            convtimes[i] = targettimes[i];
           }
+          split(convtimes[i], timefields, "'$TIMESEPARATOR'");
+          j = timecolsize;
+          do {
+            timefield = timefields[timecols[j]];
+            split(timefield, timeval);
+            for (k = 1; k <= 7; k++) {
+              calctime(timeval, k, reltimeval[k]);
+            }
+            timefield = strtime(timeval, "'"$FIELDTIMEFORMAT"'");
+            if (timefield !~ /^'"$DATEYEARREGEX"' /) {
+              targetmarks[i] = ERRORMARK;
+            }
+            timefields[timecols[j]] = timefield;
+          } while (--j > 0);
+          convtimes[i] = strfiletime(timefields, timenum);
+        }
+        for (i = 1; i <= targetsize; i++) {
+          if (targetmarks[i] != "") {
+            targetstopped = '$errstopped';
+          } else if (targettimes[i] == convtimes[i]) {
+            targetmarks[i] = UNCHANGEDMARK;
+          } else {
+            if ('$targetnochange') {
+              targetmarks[i] = CHANGECANDMARK;
+            } else if ('$targetprompt') {
+              targetmarks[i] = QUESTIONMARK;
+              targetasked = 1;
+            } else {
+              targetmarks[i] = EXECUTEDMARK;
+            }
+            changedtimes[i] = convtimes[i];
+            delete ARGV[targetindexes[i]];
+          }
+          delete targetindexes[i];
         }
         action = "Changed";
         status = 0;
@@ -687,66 +885,67 @@ dirmain(){
           action = "Canceled";
           status = 1;
         } else if (targetasked) {
-          for (i = 0; i < targetsize; i++) {
+          for (i = 1; i <= targetsize; i++) {
             targetmark = targetmarks[i];
-            if (targetmark != "") {
-              if (targetmark == QUESTIONMARK) {
-                targetmarks[i] = EXECUTEDMARK;
-              }
-              timenum = split(desttimes[i], timestrs, "'$TIMESEPARATOR'") - 1;
-              showtarget(targetmark, targetwidth, targetnames[i],
-                         timenum, timestrs, timetypes, "'$AWKSTDERR'");
+            if (targetmark == QUESTIONMARK) {
+              targetmarks[i] = EXECUTEDMARK;
             }
+            targetname = targetnames[i];
+            if ('$targetclassify') {
+              targetname = targetname targetindicators[i];
+            }
+            split(convtimes[i], timefields, "'$TIMESEPARATOR'");
+            print disptarget(targetmark, targetwidth,
+                             targetname, timecols, timefields) > deverr;
           }
-          printf "Change the above file times ? (y/n): " > "'$AWKSTDERR'";
+          printf "Change the above file times ? (y/n): " > deverr;
           status = system("read ans; case $ans in [Yy]);; *) exit 1;; esac");
           if (status != 0) {
             if (status > 1) {
-              print "" > "'$AWKSTDERR'";
+              print "" > deverr;
             }
             exit status;
           }
         }
-        for (i = 0; i < targetsize; i++) {
-          targetmark = targetmarks[i];
-          if (targetmark != "") {
-            targetname = targetnames[i];
-            timenum = split(desttimes[i], timestrs, "'$TIMESEPARATOR'") - 1;
-            if (targetmark == EXECUTEDMARK) {
-              if (status == 0) {
-                for (j = 1; j <= touchsize; j++) {
-                  if (settime(targetname, touchopts[j], timestrs[j]) != 0) {
-                    status = 1;
-                    break;
-                  }
+        for (i = 1; i <= targetsize; i++) {
+          targetname = targetnames[i];
+          if (targetmarks[i] == EXECUTEDMARK) {
+            split(changedtimes[i], timefields, "'$TIMESEPARATOR'");
+            if (status == 0 && \
+                settime(targetname, timeoptc, timecols, timefields) != 0) {
+              if (size > 0) {
+                for (j = 1; j <= timecolsize; j++) {
+                  timeoptc[j] = substr(timeorder, j, 1);
                 }
-                if (status != 0) {
-                  if (size > 0) {
-                    while (--i >= 0) {
-                      targetname = targetnames[i];
-                      if (targetname != "") {
-                        split(targettimes[i], timestrs, "'$TIMESEPARATOR'");
-                        num = 1;
-                        if ('$mtimeset') {
-                          settime(targetname, " -m", timestrs[num++]);
-                        }
-                        if ('$atimeset') {
-                          settime(targetname, " -a", timestrs[num]);
-                        }
-                      }
+                timeonceoptc[1] = timechars;
+                while (--i > 0) {
+                  targetname = targetnames[i];
+                  if (targetname != "") {
+                    split(targettimes[i], timefields, "'$TIMESEPARATOR'");
+                    if (timefields[1] != timefields[2]) {
+                      settime(targetname, timeoptc, timecols, timefields);
+                    } else {
+                      settime(targetname, timeonceoptc, timecols, timefields);
                     }
-                    action = "Rolled back";
                   }
-                  break;
                 }
+                action = "Rolled back";
               }
-              size++;
-            } else {
-              targetnames[i] = "";
+              status = 1;
+              break;
             }
-            showtarget(targetmark, targetwidth, targetname,
-                       timenum, timestrs, timetypes, devout);
+            size++;
+          } else {
+            targetnames[i] = "";
           }
+          if ('$targetclassify') {
+            targetname = targetname targetindicators[i];
+          }
+          delete targetindicators[i];
+          split(convtimes[i], timefields, "'$TIMESEPARATOR'");
+          print disptarget(targetmarks[i], targetwidth,
+                           targetname, timecols, timefields) > devout;
+          delete convtimes[i];
         }
         if (size > 0) {
           if (size == 1) {
@@ -761,98 +960,107 @@ dirmain(){
     if [ $parentrecently = 0 ]; then
       return 0
     fi
-    set -- "$(ls -t | sed '1p; d')"*
-    awk -v tzname=${DATETZNAME:-???} '
-      function timevalprintf(tm, tmfmt) {
-        return sprintf(tmfmt, tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7]);
-      }
+    awk -v tzname=${DATETZNAME:-???} -v deverr=$AWKSTDERR '
       function cmdparam(param) {
         gsub(/'\''/, "'\''\\\\&'\''", param);
         return " '\''" param "'\''";
       }
-      function gettime(target,  datecmd, cmdfmt, cmdtz) {
-        if ('$STATREFTIME') {
-          if ('$utcset') {
-            cmdtz = "TZ= ";
+      function gefilename(nameoptc, namelen,  namecmd, name) {
+        namecmd = "ls -tA" nameoptc;
+        namecmd | getline name;
+        if (namelen > 0) {
+          while (namelen < length(name) && namecmd | getline) {
+            name = name "\n" $0;
           }
-          cmdfmt = cmdtz "'"$STAT $STATMTIMEFORMAT"' %s";
-        } else {
-          if ('$utcset') {
-            cmdtz = " -u";
-          }
-          cmdfmt = "date" cmdtz " -r%s '\'"+$DATEFORMAT"\''";
         }
-        gsub(/%[^s]/, "%&", cmdfmt);
-        datecmd = sprintf(cmdfmt, cmdparam(target)) "'"$REPLACEDELIMTOSPC"'";
-        datecmd | getline;
-        close(datecmd);
-        return $0;
+        close(namecmd);
+        return name;
       }
-      function settime(target, touchopt, tm,  tmfmt) {
-        if ('$targetsymlink') {
-          touchopt = touchopt " -h";
+      function gettime(target,  tmargv, tmcmd, tmutc, tmstr) {
+        tmargv = cmdparam(target);
+        tmstr = "'"$FIELDTIMEZERO"'";
+        if ('$STATREFTIME' || '$LSREFTIME') {
+          if ('$timeutc') {
+            tmutc = "TZ= ";
+          }
+          tmcmd = tmutc "'"$GETTIME"' --" tmargv "'"$GETTIMEFILTER"'";
+        } else {
+          if ('$timeutc') {
+            tmutc = " -u";
+          }
+          tmcmd = "date" tmutc " -r" tmargv " '\'+"$DATEFORMAT"\''";
         }
-        tmfmt = "'$TOUCHFORMAT'";
-        if ('$utcset') {
+        tmcmd | getline tmstr;
+        close(tmcmd);
+        return tmstr;
+      }
+      function strtime(tm, tmfmt) {
+        return sprintf(tmfmt, tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7]);
+      }
+      function settime(target, tmoptc, tmstr,  tmargv, tmln, tmfmt, tm) {
+        tmargv = cmdparam(parent);
+        if (system("test -h " tmargv) == 0) {
+          tmln = "h";
+        }
+        tmfmt = "'$TOUCHTIMEFORMAT'";
+        if ('$timeutc') {
           tmfmt = tmfmt "Z";
         }
-        return system("touch" touchopt "'"$TOUCHTIMEOPT"'" \
-                      " " timevalprintf(tm, tmfmt) " --" cmdparam(target));
-      }
-      function cmptime(tm1, tm2,  val, ind) {
-        for (ind = 1; ind <= 7; ind++) {
-          val = tm1[ind] - tm2[ind];
-          if (val != 0) {
-            return val;
-          }
-        }
-        return 0;
+        split(tmstr, tm);
+        return system("touch -" tmoptc tmln "'"$TOUCHTIMEOPTION"'" \
+                      " " strtime(tm, tmfmt) " --" tmargv);
       }
       BEGIN {
-        month[1] = "Jan"; month[2] = "Feb"; month[3] = "Mar";
-        month[4] = "Apr"; month[5] = "May"; month[6] = "Jun";
-        month[7] = "Jul"; month[8] = "Aug"; month[9] = "Sep";
-        month[10] = "Oct"; month[11] = "Nov"; month[12] = "Dec";
+        MONTH[1] = "Jan"; MONTH[2] = "Feb"; MONTH[3] = "Mar";
+        MONTH[4] = "Apr"; MONTH[5] = "May"; MONTH[6] = "Jun";
+        MONTH[7] = "Jul"; MONTH[8] = "Aug"; MONTH[9] = "Sep";
+        MONTH[10] = "Oct"; MONTH[11] = "Nov"; MONTH[12] = "Dec";
         dirpath = ARGV[1];
-        dirwrite = system("test ! -w ./");
-        if (! dirwrite) {
+        if (system("test -w ./") != 0) {
           printf "Permission denied -- %s\n", dirpath;
           exit;
         }
-        parentpath = ARGV[2];
-        for (i = 3; i < ARGC; i++) {
-          if (ARGV[i] != "*" || system("test -e" cmdparam("*")) == 0) {
-            split(gettime(ARGV[i]), timeval);
-            if (cmptime(mostrecent, timeval) < 0) {
-              for (j = 1; j <= 7; j++) {
-                mostrecent[j] = timeval[j];
-              }
-            }
-          }
+        parent = ARGV[2];
+        fname = gefilename("q");
+        if (index(fname, "?") > 0) {
+          fname = gefilename("", length(fname));
         }
-        if (mostrecent[1] > 0) {
-          if (settime(parentpath, " -m", mostrecent) != 0) {
+        ftime = gettime(fname);
+        gsub(/[-:.]/, " ", ftime);
+        if (ftime != "'"$FIELDTIMEZERO"'") {
+          if ('${FBATCHSHDEBUG:-0}') {
+            printf "%s  %s\n", ftime, fname > deverr;
+          }
+          if (settime(parent, "m", ftime) != 0) {
             exit 1;
           }
-          if ('$utcset') {
+          if ('$timeutc') {
             tzname = "UTC";
           }
+          split(ftime, timeval);
           printf "Modified at %s %2d %02d:%02d:%02d %s %4d -- %s\n",
-                 month[int(mostrecent[2])], mostrecent[3], mostrecent[4],
-                 mostrecent[5], mostrecent[6], tzname, mostrecent[1], dirpath;
+                 MONTH[int(timeval[2])], timeval[3], timeval[4],
+                 timeval[5], timeval[6], tzname, timeval[1], dirpath;
         }
-      }' "${path%/}" "$(pwd -L)" "$@"
+      }' "${path%/}" "$(pwd -L)"
     ;;
   esac
 
   return $?
 }
 
-# Check the string and output the date and time separated by spaces. Those are
-# year, month, day, hour, minute, second, and nanosecond number.
+# Check the string and output elements of date and time separated by spaces.
+# Its numbers are year, month, day, hour, minute, second, and nanosecond.
 #
-# $1 - 1 if the time is specified with ISO 8601 format, otherwise, 0
+# $1 - 1 if the string is specified with ISO 8601 format, otherwise, 0
 # $2 - the date and time string
+
+REGEXYEAR=$DATEYEARREGEX
+REGEXMONTH='(0[1-9]|1[0-2])'
+REGEXDAY='[0-3][0-9]'
+REGEXHOUR='([0-1][0-9]|2[0-3])'
+REGEXMINUTE='[0-5][0-9]'
+REGEXSECOND='[0-5][0-9]'
 
 gettime(){
   awk '
@@ -868,25 +1076,19 @@ gettime(){
       return 31;
     }
     BEGIN {
-      REGEXYEAR = "[0-9][0-9][0-9][0-9]";
-      REGEXMONTH = "(0[1-9]|1[0-2])";
-      REGEXDAY = "[0-3][0-9]";
-      REGEXHOUR = "([0-1][0-9]|2[0-3])";
-      REGEXMINUTE = "[0-5][0-9]";
-      REGEXSEC = "[0-5][0-9]";
       if ('$1') {
-        regextime = "^" REGEXYEAR "-" REGEXMONTH "-" REGEXDAY \
-                    "[T ]" REGEXHOUR ":" REGEXMINUTE ":" REGEXSEC;
-        regexsec = "^[.,][0-9]+$";
+        REGEXTIME = "^'$REGEXYEAR'-'$REGEXMONTH'-'$REGEXDAY'" \
+                    "[T ]'$REGEXHOUR':'$REGEXMINUTE':'$REGEXSECOND'";
+        REGEXSEC = "^[.,][0-9]+$";
       } else {
-        regextime = "^" REGEXYEAR REGEXMONTH REGEXDAY REGEXHOUR REGEXMINUTE;
-        regexsec = "^\\.[0-5][0-9]$";
+        REGEXTIME = "^'$REGEXYEAR$REGEXMONTH$REGEXDAY$REGEXHOUR$REGEXMINUTE'";
+        REGEXSEC = "^\\.[0-5][0-9]$";
       }
-      if (match(ARGV[1], regextime)) {
+      if (match(ARGV[1], REGEXTIME)) {
         timeargv = substr(ARGV[1], 1, RLENGTH);
         secargv = substr(ARGV[1], RLENGTH + 1);
         if (secargv != "") {
-          if (secargv !~ regexsec) {
+          if (secargv !~ REGEXSEC) {
             exit;
           }
           if ('$1') {
@@ -905,7 +1107,7 @@ gettime(){
         }
         timeval[i] += substr(secargv, 2);
         if (timeval[3] >= 1 && timeval[3] <= mdays(timeval[1], timeval[2])) {
-          printf "'"$TIMEDATAFORMAT"'", timeval[1], timeval[2], timeval[3],
+          printf "'"$FIELDTIMEFORMAT"'", timeval[1], timeval[2], timeval[3],
                  timeval[4], timeval[5], timeval[6], timeval[7];
         }
       }
@@ -1000,6 +1202,16 @@ getreltime(){
     }'
 }
 
+# Return 0 if parameters are not empty and don't include LFs, otherwise, 1
+#
+# $@ - parameters checked whether are empty or include LFs
+
+noemptylf(){
+  return $( (echo 1; printf '%s\0' "$@") | \
+            tr ' \0' '\t ' | \
+            sed '1 { x; d; }; $ { /  / { x; p; }; d; }; x; q')
+}
+
 # Escape backslashes for the specified format or expression if the character
 # preceded by a backslash treat as one literal by awk command.
 #
@@ -1025,16 +1237,16 @@ escbslash(){
 
 # Get options of this program
 
-if [ $DATEREFTIME = 0 ]; then
-  error 1 'this environment is unsupported because of not referencing file date'
+if [ $STATREFTIME = 0 -a $LSREFTIME = 0 -a $DATEREFTIME = 0 ]; then
+  error 1 'this system is unsupported because of not referencing file date'
 fi
 
 actime=0
 modtime=0
 reftime=0
-optchars='cd:D:fhilmrRS:t:T:v'
-longopts='abreast,no-change,interactive,link,parent-recently,reference,recursive,start-from:,skip-error,verbose,help,version'
-if [ $STATREFTIME != 0 ]; then
+optchars='Acd:D:fFhilmrRS:t:T:v1'
+longopts='all,no-change,classify,interactive,link,parent-recently,quiet,reference,recursive,resume-from:,skip-error,verbose,help,version'
+if [ $FIELDATIME != 0 ]; then
   optchars=${optchars}'a'
 fi
 if [ $TOUCHSETTZ != 0 ]; then
@@ -1049,8 +1261,8 @@ do
   a)
     actime=1
     ;;
-  abreast)
-    timeabreast=1
+  A|all)
+    targetdot=1
     ;;
   c|no-change)
     targetnochange=1
@@ -1061,18 +1273,18 @@ do
     if [ -z "$timespec" ]; then
       error 0 "invalid date format -- ${1#*=}"
       usage 1
-    elif [ $TOUCHSETNSEC = 0 ] && \
-         ! expr "${1#*=}" : '.*\.[0-9][0-9]*$' > /dev/null 2>&1; then
+    elif [ $DATEREFNSEC = 0 ] && \
+         expr "${1#*=}" : '.*\.[0-9][0-9]*$' > /dev/null 2>&1; then
       error 1 'nanoseconds of file time is unsupported'
     fi
     ;;
   D)
+    reltimespec=$(getreltime "${1#*=}")
     if [ -n "${1#*=}" ]; then
-      reltimespec=$(getreltime "${1#*=}")
       if [ -z "$reltimespec" ]; then
-        error 0 "invalid date format '${1#*=}'"
+        error 0 "invalid relative date string '${1#*=}'"
         usage 1
-      elif [ $TOUCHSETNSEC = 0 ] && \
+      elif [ $DATEREFNSEC = 0 ] && \
            ! (echo "$reltimespec" | awk '$7 !~ /^0+$/ { exit 1 }'); then
         error 1 'nanoseconds of file time is unsupported'
       fi
@@ -1082,6 +1294,9 @@ do
     ;;
   f)
     targetdir=0
+    ;;
+  F|classify)
+    targetclassify=1
     ;;
   h)
     targetsymlink=1
@@ -1100,19 +1315,23 @@ do
       parentrecently=1
     fi
     ;;
+  quiet)
+    targetquiet=1
+    ;;
   r|reference)
     reftime=1
     ;;
   R|recursive)
-    travsubdir='*/'
+    travsubdirs='*/'
     ;;
-  S|start-from)
+  S|resume-from)
     travstartpath=$(if cd "${1#*=}" 2> /dev/null; then
                       pwd -L
                     fi)
     if [ -z "$travstartpath" ]; then
       error 1 "${1#*=}: No such directory"
     fi
+    travsubdirs='*/'
     ;;
   skip-error)
     errstopped=0
@@ -1126,17 +1345,22 @@ do
     ;;
   T)
     targetregex=$(escbslash "${1#*=}")
-    if ! (awk -v r="$targetregex" 'BEGIN { match("", r) }' 2>&1 | \
-          awk '{ exit 1 }'); then
-      error 0 "unsupported awk's regular expression '${1#*=}'"
-      usage 1
+    if [ -n "${1#*=}" ]; then
+      if ! noemptylf "${1#*=}" || \
+         ! awk -v r="$targetregex" 'BEGIN { match("", r) }' 2> /dev/null; then
+        error 0 "unsupported awk's regular expression '${1#*=}'"
+        usage 1
+      fi
     fi
     ;;
   utc)
-    utcset=1
+    timeutc=1
     ;;
   v|verbose)
     targetverbose=1
+    ;;
+  1)
+    timelined=1
     ;;
   help)
     usage 0
@@ -1149,7 +1373,7 @@ do
     break
     ;;
   \?*)
-    error 0 "unknown option -- ${1#\?}"
+    error 0 "unknown option -- ${1#?}"
     usage 1
     ;;
   -*)
@@ -1164,21 +1388,32 @@ do
   shift
 done
 
-if [ $actime != 0 ]; then
-  if [ $modtime = 0 ]; then
-    mtimeset=0
+if [ $targetdot != 0 ]; then
+  if [ -n "$travsubdirs" ]; then
+    travsubdirs='.*/ '$travsubdirs
   fi
-elif [ $modtime != 0 -o $STATREFTIME = 0 ]; then
-  atimeset=0
+  targetentries='.* '$targetentries
 fi
 
-# Exit if one of specifying time options is specified
+if [ $actime != 0 ]; then
+  if [ $modtime = 0 ]; then
+    timeorder='a'
+  fi
+elif [ $modtime != 0 ] || [ $DATEREFTIME != 0 ]; then
+  timeorder='m'
+fi
+
+# Exit if no one of setting time options is specified
 
 if [ $reftime = 0 -a -z "$timespec" ]; then
   exit 0
 fi
 
-# Change the access or modification time of files and subdirectories
+# Change the modification or access time of files and subdirectories
+
+if [ $# = 0 ]; then
+  set -- ./
+fi
 
 dircount=0
 
